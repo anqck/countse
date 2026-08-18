@@ -1,0 +1,14 @@
+class FeatureFusionNeck(nn.Module):
+    def __init__(self, in_channels=256, out_channels=256):
+        super().__init__()
+        self.lateral3 = nn.Conv2d(in_channels, out_channels, 1)
+        self.lateral2 = nn.Conv2d(in_channels, out_channels, 1)
+        self.lateral1 = nn.Conv2d(in_channels, out_channels, 1)
+        self.smooth = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+
+    def forward(self, features):
+        f1, f2, f3 = features
+        p3 = self.lateral3(f3)
+        p2 = self.lateral2(f2) + F.interpolate(p3, size=f2.shape[-2:], mode='nearest')
+        p1 = self.lateral1(f1) + F.interpolate(p2, size=f1.shape[-2:], mode='nearest')
+        return self.smooth(p1)  # (B, 256, H/8, W/8)

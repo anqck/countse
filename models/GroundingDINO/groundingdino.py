@@ -56,6 +56,7 @@ from .bertwarper import (
 from .transformer import build_transformer
 from .transformer_loca import TransformerEncoder
 from .positional_encoding_loca import PositionalEncodingsFixed
+from .density_head import FeatureFusionNeck, DensityDecoder, generate_gt_density
 from .utils import MLP, ContrastiveEmbed, sigmoid_focal_loss
 
 from .matcher import build_matcher
@@ -350,6 +351,10 @@ class GroundingDINO(nn.Module):
         self.transformer.decoder.bbox_embed = self.bbox_embed
         self.transformer.decoder.class_embed = self.class_embed
 
+        # density branch (Option B): post-encoder memory -> stride-8 density map
+        self.density_neck = FeatureFusionNeck(hidden_dim, hidden_dim)
+        self.density_decoder = DensityDecoder()
+
         # two stage
         self.two_stage_type = two_stage_type
         assert two_stage_type in ["no", "standard"], "unknown param {} of two_stage_type".format(
@@ -593,9 +598,19 @@ class GroundingDINO(nn.Module):
         text_dict = self.add_exemplar_tokens(tokenized, text_dict, exemplar_tokens, labels)
 
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
-        hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
+        hs, reference, hs_enc, ref_enc, init_box_proposal, memory, spatial_shapes = self.transformer(
             srcs, masks, input_query_bbox, poss, input_query_label, attn_mask, text_dict
         )
+
+        # density branch (Option B): consume post-encoder `memory`, fuse to a
+        # stride-8 map, produce a density map + density-aware features.
+        memory_t = memory.transpose(1, 2)  # [bs, 256, sum(hw)]
+        boundaries = [int(h) * int(w) for h, w in spatial_shapes]
+        mem_maps = torch.split(memory_t, boundaries, dim=2)
+        mem_maps = [torch.unflatten(m, 2, (int(h), int(w))) for m, (h, w) in zip(mem_maps, spatial_shapes)]
+        fused = self.density_neck(mem_maps)          # (bs, 256, H/8, W/8)
+        density_feats, density_map, _ = self.density_decoder(fused)
+
 
         
         # deformable-detr-like anchor update
@@ -618,6 +633,8 @@ class GroundingDINO(nn.Module):
         )
 
         out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1]}
+        out["density_map"] = density_map      # (bs, 1, H/8, W/8)
+        out["density_feats"] = density_feats  # (bs, 256, H/8, W/8)
         
 
         # Used to calculate losses
@@ -773,11 +790,30 @@ class SetCriterion(nn.Module):
         tgt_idx = torch.cat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
+    def loss_density(self, outputs, targets, indices, num_boxes):
+        """Counting loss L_D = |sum(D) - K|, mean over batch (donor convention).
+
+        Padding-aware: `targets[j]['size']` is the post-transform, pre-padding
+        image size, so only the valid stride-8 region is summed.
+        """
+        density = outputs['density_map']  # (bs, 1, H/8, W/8)
+        abs_errs = []
+        for j, t in enumerate(targets):
+            K = len(t['labels'])
+            h, w = int(t['size'][0]), int(t['size'][1])
+            h_ds, w_ds = h // 8, w // 8
+            d_valid = density[j, 0, :h_ds, :w_ds]
+            _ = generate_gt_density(t['boxes'], t['size'], stride=8, device=density.device)
+            abs_errs.append((d_valid.sum() - K).abs())
+        losses = {'loss_density': torch.stack(abs_errs).mean()}
+        return losses
+
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
             'labels': self.token_sigmoid_binary_focal_loss,
             'cardinality': self.loss_cardinality,
-            'boxes': self.loss_boxes
+            'boxes': self.loss_boxes,
+            'density': self.loss_density,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -839,6 +875,10 @@ class SetCriterion(nn.Module):
         losses = {}
         for loss in self.losses:
             losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
+
+        # density loss (single map, no aux/interm) — explicit, not in self.losses
+        if 'density_map' in outputs:
+            losses.update(self.get_loss('density', outputs, targets, indices, num_boxes))
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
@@ -1054,6 +1094,10 @@ def build_groundingdino(args):
             interm_loss_coef = 1.0
         interm_weight_dict.update({k + f'_interm': v * interm_loss_coef * _coeff_weight_dict[k] for k, v in clean_weight_dict_wo_dn.items()})
         weight_dict.update(interm_weight_dict)
+
+    # density loss weight (single term; added after aux/interm so it is not
+    # expanded into aux/interm variants or the _coeff_weight_dict lookup).
+    weight_dict['loss_density'] = getattr(args, 'density_loss_coef', 0.0)
 
     # losses = ['labels', 'boxes', 'cardinality']
     losses = ['labels', 'boxes']

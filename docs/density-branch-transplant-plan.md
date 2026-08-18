@@ -307,9 +307,9 @@ Source of `Fd` for the encoder:
 4. ~~Text-conditioned vs class-agnostic~~ **RESOLVED for now**: Option B density
    inherits text conditioning from `memory` (no explicit conditioning needed).
    A.1/A.2 (density-head-local conditioning) deferred with Option A family.
-5. Does eval (`main_inference.py`) need the density branch, or training only?
+5. ~~Does eval (`main_inference.py`) need the density branch, or training only?
    (density is a training-time auxiliary signal; eval likely detector-only — still
-   to confirm)
+   to confirm)~~ **RESOLVED FOR NOW**: ignore `_inference` branch for the moment
 6. ~~Source of `Fd` for the encoder (DETE)~~ **RESOLVED (for when DETE is pursued)**:
    pre-encoder `srcs` (backbone features), with A.1/A.2 making `Fd` text-conditioned
    locally. Post-encoder `memory` is circular with DETE and not viable for encoder
