@@ -1,10 +1,10 @@
 # Density-Branch Transplant Plan (IOCFormer-style density + CountSE regression)
 
 Goal: add a density-estimation branch to CountSE (zero-shot, text-guided counting),
-following the IOCFormer mechanism — a density branch whose density-aware features
-enhance the regression (detection) branch's encoder, alongside the existing text
-conditioning. Counting loss `L_D = ||D||_1 - K` is computed independently on the
-density map.
+following the IOCFormer mechanism. Current phase: the simplified Option B — a
+density branch consuming the post-encoder `memory`, with only the counting loss
+`L_D = ||D||_1 - K` computed independently on the density map. The donor's full
+density-enhanced-encoder mechanism (DETE) is deferred (see §4b).
 
 Status: **PLAN ONLY — no code changes made.**
 
@@ -77,25 +77,61 @@ Status: **PLAN ONLY — no code changes made.**
   `exemplars` (from ODVG dataset, datasets/odvg.py:115-123). Count `K` per image =
   `len(targets[j]["labels"])` (already used at groundingdino.py:831).
 
-## 4. Architecture decision — RESOLVED: Option B (current approach)
+## 4. Density-branch architecture
+
+### Option A family — density branch on pre-encoder backbone features (DEFERRED)
+
+More work; deferred until Option B is observed. Recorded for later:
+
+- Density branch consumes the clean backbone pyramid `srcs` (groundingdino.py:574),
+  pre-encoder: no text contamination, clean scale separation.
+- `Fd` is injected INTO the encoder (DETE) — see §4b.
+- Text-conditioned density: NO by default (class-agnostic) — but see A.1/A.2 below.
+- Gradient flow: density loss backprops through the density branch into the
+  backbone only (not through the encoder).
+- Matches donor's "initial encoder = CNN backbone" (IOCFormer).
+
+#### Option A.1 — A + text-guided feature gating in density head (light, local)
+
+Reuse `ContrastiveEmbed` (utils.py:233-273) to compute per-location text alignment
+and gate `Fd` with it, inside the density head only (local consumption):
+
+```
+sim = ContrastiveEmbed()(Fd, text_dict)          # (B, H/8*W/8, n_text), masked
+attn = softmax(sim, dim=-1)
+text_ctx = attn @ encoded_text                   # (B, H/8*W/8, 256) text context
+Fd_text = Fd + gamma * text_ctx                  # or concat + 1x1 conv
+```
+
+- No new attention machinery; reuses `encoded_text` (groundingdino.py:546).
+- Same idea as `BiAttentionBlock` (fuse_modules.py:252) without its weight cost.
+- Text-conditioned density: YES (light). Extra compute trivial vs 6-layer encoder.
+
+#### Option A.2 — A + full cross-attention in density head (heavy, local)
+
+Instantiate `BiAttentionBlock` (or `BiMultiHeadAttention`, fuse_modules.py:99)
+inside the density head: `v = Fd`, `l = encoded_text`. Proper multi-head
+cross-attention; same module the encoder uses, so behavior well-understood.
+
+- Text-conditioned density: YES (full).
+- More compute than A.1, but still local to the density head.
+
+### Option B (post-encoder `memory`)
 
 **Decision: density branch consumes the post-encoder `memory` (text-conditioned),
-fused via `FeatureFusionNeck` into a stride-8 map, and `Fd` enhances the features
-before the decoder.**
+fused via `FeatureFusionNeck` into a stride-8 map. That's ALL — no encoder
+injection, no DETE, no text conditioning inside the density head.**
 
 - Density branch consumes text-conditioned encoder `memory` (sliced per level via
   `spatial_shapes`/`level_start_index`), fused by `FeatureFusionNeck` into a
   stride-8 map.
-- `Fd` is added to `memory` before the decoder (not inside the encoder).
-- Text-conditioned density: YES (density inherits text conditioning).
-- Diverges from donor's "density-enhanced encoder" mechanism; density branch is a
-  parallel decoder-side branch.
+- The model is affected ONLY by the counting loss `L_D` on the DM branch and the
+  encoder (which produces `memory`, the DM branch's input). No other wiring.
+- Text-conditioned density: YES (density inherits text conditioning from `memory`).
+- **Plan: implement Option B first, observe the produced density map, then decide
+  whether to pursue the Option A family (deferred).**
 
-(Option A — density branch on pre-encoder backbone features, `Fd` injected INTO
-the encoder — was considered but NOT chosen. Rationale: Option B keeps density
-text-conditioned, which matters for zero-shot counting.)
-
-### Fusion-neck design — three recorded alternatives
+#### Fusion-neck design — three recorded alternatives
 
 The decoder keeps the 4 levels separate (each query samples per level via
 `MSDeformAttn`, ms_deform_attn.py:294-347; proposals get scale-appropriate box
@@ -127,6 +163,79 @@ deformable-attention layer (reuse `MSDeformAttn`) that samples all 4 levels per
 output location. Most faithful to "how the decoder uses the 4 maps"; preserves
 text-conditioned features at all scales. Most complex to implement.
 
+## 4b. Encoder modification — DETE (density-enhanced transformer encoder) — DEFERRED
+
+### Status
+
+**NOT implemented now.** Option B (chosen) does not touch the encoder — the DM
+branch only consumes `memory` and its counting loss backprops through the encoder
+(which produces `memory`). DETE is deferred until Option B is observed.
+
+### Design conflict (recorded)
+
+The donor's DETE requires the density branch to run on **pre-encoder** features
+(`Fd` is an *input* to the transformer encoder). This conflicts with Option B
+(density branch on post-encoder `memory`): you cannot feed `Fd` into the encoder
+when `Fd` is computed from the encoder's own output (circular dependency).
+
+**When DETE is pursued later:** it requires the Option A family (§4, deferred) —
+density branch on pre-encoder `srcs`, `Fd` available pre-encoder, injectable into
+the encoder input. With A.1/A.2, `Fd` is text-conditioned locally in the density
+head; the encoder modification is the same regardless of A.1 vs A.2.
+
+### DETE mechanism (from donor paper)
+
+- DETE takes two inputs: `F` (initial-encoder features) and `Fd` (density-aware
+  features from the density branch).
+- Both are projected to the same channel count `c` via an MLP layer.
+- Input to the first transformer layer = `F̂ + F̂d + position embedding`.
+- Density map tells the encoder where objects are dense/sparse, refining feature
+  regions with indiscernible instances.
+
+### Encoder modification in CountSE (DETE-style)
+
+The encoder input is `src_flatten: [bs, sum(h*w), 256]` (4 levels concatenated),
+built in `Transformer.forward` (transformer.py:242-254). Two insertion points:
+
+**Insertion point 1 — pre-encoder (in `GroundingDINO.forward`, groundingdino.py:589,**
+**before the `transformer` call).** No change to `transformer.py`:
+- `Fd` (stride-8, 256ch) is resized to each of the 4 levels' resolutions.
+- Add per level: `srcs[i] = srcs[i] + F.interpolate(Fd, size=srcs[i].shape[-2:])`.
+- The encoder, text fusion, and BiAttentionBlock all run unchanged.
+
+**Insertion point 2 — inside `Transformer.forward` (transformer.py:242-254).**
+- Add `Fd` as an extra argument to `Transformer.forward` / `TransformerEncoder.forward`.
+- After `src_flatten` is built, add the density-enhanced tokens:
+  `src_flatten = src_flatten + Fd_flatten` (where `Fd_flatten` is `Fd` resized to
+  each level and flattened+concatenated the same way).
+- Requires touching `Transformer.forward` and `TransformerEncoder.forward`
+  signatures (transformer.py:270, 505-544).
+
+**Per-layer injection (alternative):** add `Fd` to each `DeformableTransformerEncoderLayer`
+input inside the layer loop (transformer.py:568-616), e.g. `output = output + Fd_lvl`.
+More invasive; only needed if density should be re-injected at every layer rather
+than once at the input.
+
+### How the encoder consumes it (no change to MSDeformAttn)
+
+The encoder's self-attention is `MSDeformAttn` (transformer.py:779-785), which
+samples across all 4 levels via `spatial_shapes`/`level_start_index`. Adding `Fd`
+to the input tokens means every token (at every level) carries density information
+before the 6 deformable self-attention layers refine it. The text fusion
+(BiAttentionBlock) and text enhancer run unchanged.
+
+### Open sub-question (recorded, not blocking)
+
+Source of `Fd` for the encoder:
+- **Pre-encoder `srcs`** (groundingdino.py:574): clean backbone features, density
+  class-agnostic by default — but with A.1/A.2 the density head conditions `Fd` on
+  text locally, so `Fd` is text-conditioned even though it originates from `srcs`.
+  Matches donor's "initial encoder = CNN backbone".
+- **Post-encoder `memory`**: text-conditioned density, but circular with DETE
+  (can't feed encoder output back into encoder input). Only viable if the density
+  branch runs on `memory` and `Fd` is used for decoder-side enhancement (Option B),
+  NOT for encoder injection.
+
 ## 5. Implementation steps (Option B + Fusion 1 outline)
 
 ### 5.1 New modules (new file, e.g. `models/GroundingDINO/density_head.py`)
@@ -140,7 +249,9 @@ text-conditioned features at all scales. Most complex to implement.
   - forward returns `[density_feats (Fd), mu2 (D), mu2_normed]`.
   - NOTE: donor `dm_decoder2` expects 2048 input channels; ours is 256. First conv
     must be 256. Donor's `F.upsample_bilinear(x, scale_factor=2)` produces stride-4
-    density from stride-8 input — verify against density-GT resolution.
+    density from stride-8 input — since GT is downsampled to 1/8 for `L_D`
+    (§0), the density map must be at 1/8 to match; drop or adjust the donor's
+    `scale_factor=2` upsample accordingly.
 
 ### 5.2 Density GT generation (data step)
 - From box centers (2x2 boxes) or original FSC-147 points: Gaussian-blurred point
@@ -151,11 +262,15 @@ text-conditioned features at all scales. Most complex to implement.
 - Add `target["density"]` (or `target["points"]`) in the dataset `__getitem__`.
 
 ### 5.3 Wire into `GroundingDINO.forward` (groundingdino.py:484)
-- After `memory` (transformer.py:282): slice per level with
-  `spatial_shapes`/`level_start_index`, run neck+decoder, add `Fd` to `memory`
-  before the decoder.
+- **Density branch (Option B, CHOSEN)**: after `memory` (transformer.py:282),
+  slice per level with `spatial_shapes`/`level_start_index`, run neck+decoder on
+  the sliced `memory` -> `Fd`, `D`, `D_normed`. NO encoder injection, NO DETE, NO
+  text conditioning inside the density head.
 - Add to output dict (groundingdino.py:620): `out["density_map"] = D`,
   `out["density_feats"] = Fd`.
+- **Deferred (Option A family)**: density branch on `srcs` (line 574) + DETE
+  injection before the `transformer` call (line 596): `srcs[i] = srcs[i] +
+  F.interpolate(Fd, size=srcs[i].shape[-2:])`. See §4b.
 
 ### 5.4 Loss in `SetCriterion` (groundingdino.py:667)
 - New loss `loss_density`: `L_D = ||D||_1 - K` per image, mean over batch.
@@ -178,7 +293,9 @@ text-conditioned features at all scales. Most complex to implement.
 
 ## 6. Open questions for the user
 1. ~~Option A or B~~ **RESOLVED**: Option B (density branch on post-encoder
-   `memory`, `Fd` before decoder). Fusion 1 (fuse encoder memory first) chosen.
+   `memory`, fused to stride-8, counting loss only). Implement and observe the
+   produced density map first. Option A family (pre-encoder `srcs` + DETE + local
+   text conditioning A.1/A.2) is DEFERRED until Option B is observed.
 2. ~~Density GT source~~ **RESOLVED**: box centers from repo data (2x2 boxes count as
    points); density generated at 1:1 image resolution with Gaussian kernel radius =
    second-smallest inter-instance distance.
@@ -187,7 +304,13 @@ text-conditioned features at all scales. Most complex to implement.
    upsampling invents it. Gaussian-blurred maps downsample cleanly. Must be
    consistent with training-time random-resize transforms (resize GT by the same
    factor as the image; kernel radius defined in image pixels).
-4. ~~Text-conditioned vs class-agnostic~~ **RESOLVED**: text-conditioned (Option B).
+4. ~~Text-conditioned vs class-agnostic~~ **RESOLVED for now**: Option B density
+   inherits text conditioning from `memory` (no explicit conditioning needed).
+   A.1/A.2 (density-head-local conditioning) deferred with Option A family.
 5. Does eval (`main_inference.py`) need the density branch, or training only?
    (density is a training-time auxiliary signal; eval likely detector-only — still
    to confirm)
+6. ~~Source of `Fd` for the encoder (DETE)~~ **RESOLVED (for when DETE is pursued)**:
+   pre-encoder `srcs` (backbone features), with A.1/A.2 making `Fd` text-conditioned
+   locally. Post-encoder `memory` is circular with DETE and not viable for encoder
+   injection. Not acted on now — DETE is deferred.
