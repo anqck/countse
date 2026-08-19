@@ -76,67 +76,226 @@ class DensityDecoder(nn.Module):
         return [self.reg_layer2(x2), mu, mu_normed]
 
 
+# def generate_gt_density(
+#     pts: torch.Tensor,
+#     shape,
+#     s_factor: float = 8.0,
+#     normalize: bool = False,
+# ) -> torch.Tensor:
+#     """
+#     Generate per-point continuous GT Gaussian density maps on GPU.
+
+#     Args:
+#         pts (torch.Tensor[float32]): [N, 2] normalized coordinates (x, y) in range [0, 1].
+#             Can be passed directly from bounding box centers `boxes[:, :2]`.
+#         shape (tuple[int, int] | Sequence[int]): The (H, W) spatial resolution of the sampled canvas.
+#         s_factor (float): Divisor used to derive Gaussian standard deviation (sigma)
+#             from the 1st nearest neighbor distance.
+#         normalize (bool): If True, normalizes each map such that the 2D continuous
+#             integral equals 1. If False, peak amplitude at point center is 1.
+
+#     Returns:
+#         torch.Tensor[float32]: [N, H, W] Gaussian density maps for each GT point.
+#     """
+#     H, W = int(shape[0]), int(shape[1])
+#     N = pts.shape[0]
+
+#     if N == 0:
+#         return torch.zeros((0, H, W), dtype=torch.float32, device=pts.device)
+
+#     # 1. Denormalize coordinates: x -> [0, W], y -> [0, H]
+#     scale = torch.tensor([W, H], dtype=torch.float32, device=pts.device)
+#     pts_px = pts[:, :2] * scale  # [N, 2] -> col 0: x (pixels), col 1: y (pixels)
+
+#     x_center = pts_px[:, 0:1]  # [N, 1]
+#     y_center = pts_px[:, 1:2]  # [N, 1]
+
+#     # 2. Compute adaptive bandwidth (sigma) via nearest neighbor distance
+#     if N == 1:
+#         # Fallback for single object: scale relative to image average dimension
+#         sigma = (float(H + W) / 2.0) / (4.0 * s_factor)
+#     else:
+#         dists = torch.cdist(pts_px, pts_px, p=2.0)
+#         dists.fill_diagonal_(torch.inf)
+#         knn_dists, _ = torch.topk(dists, k=1, largest=False, dim=-1)
+#         sigma = (knn_dists.mean() / s_factor).clamp(min=1e-4).item()
+
+#     inv_two_var = 1.0 / (2.0 * (sigma**2))
+
+#     # 3. 1D Coordinate grids along height (Y) and width (X)
+#     # [1, H]
+#     y_grid = torch.arange(H, dtype=torch.float32, device=pts.device).unsqueeze(0)
+#     # [1, W]
+#     x_grid = torch.arange(W, dtype=torch.float32, device=pts.device).unsqueeze(0)
+
+#     # 4. Separable 1D Gaussian evaluations: O(N * (H + W))
+#     gy = torch.exp(-((y_grid - y_center) ** 2) * inv_two_var)  # [N, H]
+#     gx = torch.exp(-((x_grid - x_center) ** 2) * inv_two_var)  # [N, W]
+
+#     # 5. Outer product broadcasting: [N, H, 1] * [N, 1, W] -> [N, H, W]
+#     density = gy.unsqueeze(-1) * gx.unsqueeze(-2)
+
+#     # 6. Integral normalization
+#     if normalize:
+#         density = density / (2.0 * math.pi * (sigma**2))
+
+#     return density
+
 def generate_gt_density(
     pts: torch.Tensor,
-    shape: torch.Tensor | Sequence[int],
+    shape,
     s_factor: float = 8.0,
     normalize: bool = False,
 ) -> torch.Tensor:
     """
-    Generate per-point continuous GT Gaussian density maps on GPU.
+    Generate per-point Gaussian maps on GPU.
 
     Args:
-        pts (torch.Tensor[float32]): [N, 2] normalized coordinates (x, y) in range [0, 1].
-            Can be passed directly from bounding box centers `boxes[:, :2]`.
-        shape (tuple[int, int] | Sequence[int]): The (H, W) spatial resolution of the sampled canvas.
-        s_factor (float): Divisor used to derive Gaussian standard deviation (sigma)
-            from the 1st nearest neighbor distance.
-        normalize (bool): If True, normalizes each map such that the 2D continuous
-            integral equals 1. If False, peak amplitude at point center is 1.
+        pts:
+            [N, 2], normalized (x, y) coordinates in [0, 1].
+
+        shape:
+            (H, W) of the target canvas.
+
+        s_factor:
+            sigma = nearest-neighbor-distance / s_factor.
+
+        normalize:
+            False:
+                peak-normalized Gaussian, peak ~= 1.
+
+            True:
+                continuous-integral normalized Gaussian.
 
     Returns:
-        torch.Tensor[float32]: [N, H, W] Gaussian density maps for each GT point.
+        [N, H, W]
     """
+
     H, W = int(shape[0]), int(shape[1])
     N = pts.shape[0]
 
     if N == 0:
-        return torch.zeros((0, H, W), dtype=torch.float32, device=pts.device)
+        return torch.zeros(
+            (0, H, W),
+            dtype=torch.float32,
+            device=pts.device,
+        )
 
-    # 1. Denormalize coordinates: x -> [0, W], y -> [0, H]
-    scale = torch.tensor([W, H], dtype=torch.float32, device=pts.device)
-    pts_px = pts[:, :2] * scale  # [N, 2] -> col 0: x (pixels), col 1: y (pixels)
+    # ---------------------------------------------------------
+    # 1. Normalized coordinates -> pixel coordinates
+    # ---------------------------------------------------------
+    scale = torch.tensor(
+        [W, H],
+        dtype=torch.float32,
+        device=pts.device,
+    )
 
-    x_center = pts_px[:, 0:1]  # [N, 1]
-    y_center = pts_px[:, 1:2]  # [N, 1]
+    pts_px = pts[:, :2] * scale
+    # [N, 2]
 
-    # 2. Compute adaptive bandwidth (sigma) via nearest neighbor distance
+    x_center = pts_px[:, 0:1]
+    y_center = pts_px[:, 1:2]
+    # [N, 1]
+
+    # ---------------------------------------------------------
+    # 2. Adaptive sigma for EACH point
+    # ---------------------------------------------------------
     if N == 1:
-        # Fallback for single object: scale relative to image average dimension
-        sigma = (float(H + W) / 2.0) / (4.0 * s_factor)
+
+        sigma = torch.tensor(
+            (H + W) / 2.0 / (4.0 * s_factor),
+            dtype=torch.float32,
+            device=pts.device,
+        )
+
+        # [1, 1]
+        sigma = sigma.reshape(1, 1)
+
     else:
-        dists = torch.cdist(pts_px, pts_px, p=2.0)
+
+        dists = torch.cdist(
+            pts_px,
+            pts_px,
+            p=2.0,
+        )
+        # [N, N]
+
         dists.fill_diagonal_(torch.inf)
-        knn_dists, _ = torch.topk(dists, k=1, largest=False, dim=-1)
-        sigma = (knn_dists.mean() / s_factor).clamp(min=1e-4).item()
 
-    inv_two_var = 1.0 / (2.0 * (sigma**2))
+        knn_dists = dists.min(dim=-1).values
+        # [N]
 
-    # 3. 1D Coordinate grids along height (Y) and width (X)
+        sigma = (
+            knn_dists / s_factor
+        ).clamp(min=1)
+
+        # IMPORTANT:
+        # [N] -> [N, 1]
+        sigma = sigma.unsqueeze(1)
+
+    # ---------------------------------------------------------
+    # 3. Gaussian coefficient
+    # ---------------------------------------------------------
+    inv_two_var = 1.0 / (
+        2.0 * sigma.pow(2)
+    )
+    # [N, 1]
+
+    # ---------------------------------------------------------
+    # 4. Coordinate grids
+    # ---------------------------------------------------------
+    y_grid = torch.arange(
+        H,
+        dtype=torch.float32,
+        device=pts.device,
+    ).unsqueeze(0)
     # [1, H]
-    y_grid = torch.arange(H, dtype=torch.float32, device=pts.device).unsqueeze(0)
+
+    x_grid = torch.arange(
+        W,
+        dtype=torch.float32,
+        device=pts.device,
+    ).unsqueeze(0)
     # [1, W]
-    x_grid = torch.arange(W, dtype=torch.float32, device=pts.device).unsqueeze(0)
 
-    # 4. Separable 1D Gaussian evaluations: O(N * (H + W))
-    gy = torch.exp(-((y_grid - y_center) ** 2) * inv_two_var)  # [N, H]
-    gx = torch.exp(-((x_grid - x_center) ** 2) * inv_two_var)  # [N, W]
+    # ---------------------------------------------------------
+    # 5. Separable Gaussian
+    # ---------------------------------------------------------
+    gy = torch.exp(
+        -((y_grid - y_center).pow(2))
+        * inv_two_var
+    )
+    # [N, H]
 
-    # 5. Outer product broadcasting: [N, H, 1] * [N, 1, W] -> [N, H, W]
-    density = gy.unsqueeze(-1) * gx.unsqueeze(-2)
+    gx = torch.exp(
+        -((x_grid - x_center).pow(2))
+        * inv_two_var
+    )
+    # [N, W]
 
-    # 6. Integral normalization
+    # ---------------------------------------------------------
+    # 6. Outer product
+    # ---------------------------------------------------------
+    density = (
+        gy.unsqueeze(-1)
+        * gx.unsqueeze(-2)
+    )
+    # [N, H, W]
+
+    # ---------------------------------------------------------
+    # 7. Optional integral normalization
+    # ---------------------------------------------------------
     if normalize:
-        density = density / (2.0 * math.pi * (sigma**2))
+        # density = density / (
+        #     2.0
+        #     * math.pi
+        #     * sigma.pow(2)
+        # )
+        density_sum = density.sum(
+            dim=(-2, -1),
+            keepdim=True,
+        )
+
+        density = density / density_sum.clamp(min=1e-8)
 
     return density

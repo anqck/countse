@@ -1,0 +1,20 @@
+{
+  "train": [
+    {
+      "root": "/mnt/storage0/Workspace/AnimalCounting/Datasets/Animal39-Merged-Final/images",
+      "anno": "/mnt/storage0/Workspace/AnimalCounting/Datasets/Animal39-Merged-Final/odvg_train.jsonl",
+      "label_map": "/mnt/storage0/Workspace/AnimalCounting/Datasets/Animal39-Merged-Final/odvg_train_label_map.json",
+      "dataset_mode": "odvg"
+    }
+  ],
+  "val": [
+    {
+      "root": "/mnt/storage0/Workspace/AnimalCounting/Datasets/Animal39-Merged-Final/images",
+      "anno": "/mnt/storage0/Workspace/AnimalCounting/Datasets/Animal39-Merged-Final/coco_test.json",
+      "label_map": null,
+      "dataset_mode": "coco"
+    }
+  ]
+}
+
+

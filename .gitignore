@@ -1,0 +1,5 @@
+**/__pycache__/**
+.Results/**
+checkpoints/**
+checkpoint_best_regular.pth
+logits.npy

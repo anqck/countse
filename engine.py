@@ -24,6 +24,100 @@ from datasets.coco_eval import CocoEvaluator
 from datasets.cocogrounding_eval import CocoGroundingEvaluator
 
 from datasets.panoptic_eval import PanopticEvaluator
+import pandas as pd
+
+def make_interval_nested(df, intervals):
+    """
+    Iterates through flexible interval boundaries to group filenames by class.
+
+    Parameters:
+    - df: pd.DataFrame containing 'gt_cnt' column
+    - intervals: List of tuples representing intervals, e.g., [(2, 5), (3,), (None, 4), (2, -1)].
+    """
+    for interval in intervals:
+        # Extract boundaries supporting variable tuple lengths
+        low = interval[0] if len(interval) > 0 else None
+        high = interval[1] if len(interval) > 1 else None
+
+        # Initialize an all-True Boolean mask matching the DataFrame index
+        mask = pd.Series(True, index=df.index)
+
+        # Apply lower bound constraint if present and valid
+        if low is not None and low != -1:
+            mask &= df["gt_cnt"] >= low
+
+        # Apply upper bound constraint if present and valid
+        if high is not None and high != -1:
+            mask &= df["gt_cnt"] <= high
+
+        # Generate the tracking label based on the active constraints
+        is_low_bound = low is not None and low != -1
+        is_high_bound = high is not None and high != -1
+
+        if is_low_bound and is_high_bound:
+            label = f"{low}-{high}"
+        elif is_low_bound:
+            label = f">={low}"
+        elif is_high_bound:
+            label = f"<={high}"
+        else:
+            label = "unbounded"
+
+        # Filter the target DataFrame using the compiled mask
+        yield label, df[mask]
+
+def print_bins_result(counts):
+    frame = pd.DataFrame(
+        counts,
+        columns=[ "pred_cnt", "gt_cnt"],
+    )
+    target_intervals = [(1, 5), (6, 10), (11, 20), (21, 40), (41,)]
+    headers = []
+    values = []
+
+    def calc_mae(gt, pred):
+        return np.average(np.abs(np.array(gt) - np.array(pred)))
+
+    def calc_rmse(gt, pred):
+        return np.sum((np.array(pred) - np.array(gt)) ** 2 / len(gt)) ** 0.5
+
+    for label, sub_df in make_interval_nested(frame, target_intervals):
+        headers.append(label)
+        print(f"Calculating MAE, RMSE {label}. {len(sub_df['gt_cnt'].values)} images")
+        if len(sub_df) > 0:
+            val_mae = calc_mae(sub_df["gt_cnt"].values, sub_df["pred_cnt"].values)
+            val_rmse = calc_rmse(sub_df["gt_cnt"].values, sub_df["pred_cnt"].values)
+            values.append((val_mae, val_rmse))
+        else:
+            values.append((0.0, 0.0))
+
+    current_bins = []
+    current_metrics = []
+    for b, m in zip(headers, values):
+        temp_bins = current_bins + [b]
+        temp_metrics = current_metrics + [m]
+        h_line = "".join(f"{x}\t\t" for x in temp_bins).rstrip("\t")
+        m_line = "".join(f"{y[0]:.4f}\t{y[1]:.4f}\t" for y in temp_metrics).rstrip("\t")
+        if len(current_bins) > 0 and (
+            len(h_line.expandtabs(8)) > 80 or len(m_line.expandtabs(8)) > 80
+        ):
+            print("".join(f"{x}\t\t" for x in current_bins).rstrip("\t"))
+            print(
+                "".join(f"{y[0]:.4f}\t{y[1]:.4f}\t" for y in current_metrics).rstrip(
+                    "\t"
+                )
+            )
+            current_bins = [b]
+            current_metrics = [m]
+        else:
+            current_bins = temp_bins
+            current_metrics = temp_metrics
+    if current_bins:
+        print("".join(f"{x}\t\t" for x in current_bins).rstrip("\t"))
+        print(
+            "".join(f"{y[0]:.4f}\t{y[1]:.4f}\t" for y in current_metrics).rstrip("\t")
+        )
+
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -133,25 +227,23 @@ def get_count_errs(
         text_threshold,
         targets,
         tokenized_captions,
-        input_captions):
+        input_captions,
+        counts=None,
+        counts_den=None,
+        count_output_state_dict = None):
     logits = outputs['pred_logits'].sigmoid()
+    densities = outputs['density_map'].cpu()
+
     boxes = outputs['pred_boxes']
     np.save("logits.npy", logits.cpu().numpy())
     samples = samples.to_img_list()
     sizes = [target["size"] for target in targets]
     
     abs_errs = []
+    abs_errs_density = []
     for sample_ind in range(len(targets)):
         sample_logits = logits[sample_ind]
         sample_boxes = boxes[sample_ind]
-        input_caption = input_captions[sample_ind]
-        sample = samples[sample_ind]
-        size = sizes[sample_ind]
-        sample_exemplars = exemplars[sample_ind]
-
-        # Setting adaptive logit threshold based on Otsu's binarization algo.
-        #max_logits = sample_logits.max(dim=-1).values.cpu().numpy()
-        #box_threshold = threshold_otsu(max_logits)
 
         for token_ind in range(len(tokenized_captions['input_ids'][sample_ind])):
             idx = tokenized_captions['input_ids'][sample_ind][token_ind]
@@ -161,8 +253,6 @@ def get_count_errs(
                 break
 
         box_mask = sample_logits.max(dim=-1).values > box_threshold
-        expected_cnt = sample_logits.max(dim=-1).values.sum().item()
-        expected_cnt = sample_logits[:, 1:end_idx].mean(dim=-1).sum().item()
         sample_logits = sample_logits[box_mask, :]
         sample_boxes = sample_boxes[box_mask, :]
         
@@ -170,16 +260,53 @@ def get_count_errs(
         sample_logits = sample_logits[text_mask, :]
         sample_boxes = sample_boxes[text_mask, :]
         
-        gt_count = targets[sample_ind]['labels'].shape[0]
+        gt_count = targets[sample_ind]["labels"].shape[0]
         pred_cnt = sample_logits.shape[0]
+
+        pred_cnt_den = densities[sample_ind].sum() .item()
+
+        if counts is not None:
+            counts.append((pred_cnt, gt_count))
+        
+        if counts_den is not None:
+            counts_den.append((pred_cnt_den, gt_count))
+             
+
+
+        if count_output_state_dict is not None:
+            sample_scores = sample_logits.max(dim=-1).values
+            count_info = torch.cat((sample_boxes, sample_scores.unsqueeze(-1)), dim=1)
+
+            if "count_info" not in count_output_state_dict:
+                count_output_state_dict["count_info"] = []
+            if "image_ids" not in count_output_state_dict:
+                count_output_state_dict["image_ids"] = []
+            if "pred_cnt" not in count_output_state_dict:
+                count_output_state_dict["pred_cnt"] = []
+            if "pred_cnt_den" not in count_output_state_dict:
+                count_output_state_dict["pred_cnt_den"] = []
+            if "gt_cnt" not in count_output_state_dict:
+                count_output_state_dict["gt_cnt"] = []
+            if "pred_masks" not in count_output_state_dict:
+                count_output_state_dict["pred_masks"] = []
+
+            count_output_state_dict["count_info"].append(count_info.cpu())
+            count_output_state_dict["image_ids"].append(
+                int(targets[sample_ind]["image_id"].item())
+            )
+            count_output_state_dict["pred_cnt"].append(pred_cnt)
+            count_output_state_dict["gt_cnt"].append(gt_count)
+            count_output_state_dict["pred_cnt_den"].append(pred_cnt_den)
 
         if pred_cnt == 0:
             print("All query logits: " + str(logits[sample_ind]))
             print("First query logit: " + str(logits[sample_ind][0]))
             print("tokenized caption: " + str(tokenized_captions['input_ids']))
         print("Pred Count: " + str(pred_cnt) + ", GT Count: " + str(gt_count))
+        
         abs_errs.append(np.abs(gt_count - pred_cnt)) 
-    return abs_errs
+        abs_errs_density.append(np.abs(gt_count - pred_cnt_den)) 
+    return abs_errs, abs_errs_density
 
 @torch.no_grad()
 def evaluate(
@@ -236,6 +363,8 @@ def evaluate(
     caption = " . ".join(cat_list) + ' .'
     print("Input text prompt:", caption)
 
+    counts = []
+    counts_den = []
     abs_errs = []
     density_abs_errs = []
     for samples, targets in metric_logger.log_every(data_loader, 10, header, logger=logger):
@@ -246,13 +375,13 @@ def evaluate(
 
         bs = samples.tensors.shape[0]
         input_captions = [cat_list[target['labels'][0]] + " ." for target in targets]
-        print("input_captions: " + str(input_captions))
+        # print("input_captions: " + str(input_captions))
         with torch.cuda.amp.autocast(enabled=args.amp):
             with torch.no_grad():
                 outputs = model(samples, [torch.tensor([0]).to(device) for t in targets], input_captions, captions=input_captions)
 
         tokenized_captions = outputs["token"]
-        abs_errs += get_count_errs(
+        abs_err, density_abs_err = get_count_errs(
             samples,
             exemplars,
             outputs,
@@ -260,14 +389,24 @@ def evaluate(
             args.text_threshold,
             targets,
             tokenized_captions,
-            input_captions)
-        if 'density_map' in outputs:
-            density_map = outputs['density_map']  # (bs, 1, H/8, W/8)
-            for j, t in enumerate(targets):
-                h, w = int(t['size'][0]) // 8, int(t['size'][1]) // 8
-                pred_cnt = density_map[j, 0, :h, :w].sum().item()
-                gt_cnt = len(t['labels'])
-                density_abs_errs.append(np.abs(gt_cnt - pred_cnt))
+            input_captions,
+            counts, 
+            counts_den
+        )
+
+        abs_errs += abs_err
+        density_abs_errs += density_abs_err
+
+        # if 'density_map' in outputs:
+        #     density_map = outputs['density_map']  # (bs, 1, H/8, W/8)
+        #     for j, t in enumerate(targets):
+        #         h, w = int(t['size'][0]) // 8, int(t['size'][1]) // 8
+        #         pred_cnt = density_map[j, 0, :h, :w].sum().item()
+        #         print(h, w, density_map.shape, outputs.keys())
+        #         assert 1 == 0
+        #         gt_cnt = len(t['labels'])
+        #         density_abs_errs.append(np.abs(gt_cnt - pred_cnt))
+
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
 
         results = postprocessors['bbox'](outputs, orig_target_sizes)
@@ -292,9 +431,6 @@ def evaluate(
             panoptic_evaluator.update(res_pano)
         
         if args.save_results:
-
-
-
             for i, (tgt, res) in enumerate(zip(targets, results)):
                 """
                 pred vars:
@@ -338,6 +474,10 @@ def evaluate(
         density_mae = sum(density_abs_errs) / len(density_abs_errs)
         density_rmse = (np.array(density_abs_errs) ** 2).mean() ** (1/2)
         print("Density MAE: {}, Density RMSE: {}".format(density_mae, density_rmse))
+
+    print_bins_result(counts)
+    print_bins_result(counts_den)
+
     if args.save_results:
         import os.path as osp
         

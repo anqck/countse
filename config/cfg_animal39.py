@@ -114,9 +114,8 @@ dn_scalar = 100
 box_threshold = 0.35
 text_threshold = 0
 use_coco_eval = False
-label_list = ['alcohol bottle', 'baguette roll', 'ball', 'banana', 'bead', 'bee', 'birthday candle', 'biscuit', 'boat', 'bottle', 'bowl', 'box', 'bread roll', 'brick', 'buffalo', 'bun', 'calamari ring', 'can', 'candle', 'cap', 'car', 'cartridge', 'cassette', 'cement bag', 'cereal', 'chewing gum piece', 'chopstick', 'clam', 'coffee bean', 'coin', 'cotton ball', 'cow', 'crane', 'crayon', 'croissant', 'crow', 'cup', 'cupcake', 'cupcake holder', 'fish', 'gemstone', 'go game piece', 'goat', 'goldfish snack', 'goose', 'ice cream', 'ice cream cone', 'instant noodle', 'jade stone', 'jeans', 'kidney bean', 'kitchen towel', 'lighter', 'lipstick', 'm&m piece', 'macaron', 'match', 'meat skewer', 'mini blind', 'mosaic tile', 'naan bread', 'nail', 'nut', 'onion ring', 'orange', 'pearl', 'pen', 'pencil', 'penguin', 'pepper', 'person', 'pigeon', 'plate', 'polka dot tile', 'potato', 'rice bag', 'roof tile', 'screw', 'shoe', 'spoon', 'spring roll', 'stair', 'stapler pin', 'straw', 'supermarket shelf', 'swan', 'tomato', 'watermelon', 'window', 'zebra']
-val_label_list = ['ant', 'bird', 'book', 'bottle cap', 'bullet', 'camel', 'chair', 'chicken wing', 'donut', 'donut holder', 'flamingo', 'flower', 'flower pot', 'grape', 'horse', 'kiwi', 'milk carton', 'oyster', 'oyster shell', 'package of fresh cut fruit', 'peach', 'pill', 'polka dot', 'prawn cracker', 'sausage', 'seagull', 'shallot', 'shirt', 'skateboard', 'toilet paper roll']
-
+label_list = ["African Forest Elephant", "African Savanna Elephant", "American Beaver", "Asian Elephant", "Black Rat", "Black-Tailed Prairie Dog", "Bonobo", "Bornean Orangutan", "Brown Bear", "Brown Rat", "Chimpanzee", "Domestic Cat", "Domestic Dog", "Domestic Horse", "Eurasian Red Squirrel", "Gray Wolf", "Ground Squirrel", "House Mouse", "Indian Rhinoceros", "Leopard", "Lion", "Mountain Zebra", "Olive Baboon", "Plains Zebra", "Red Fox", "Rhesus Macaque", "Ring-Tailed Lemur", "Sea Otter", "Tiger", "Vervet Monkey", "Western Gorilla"]
+val_label_list = ["American Bison", "Common Eland", "Cow", "Domestic Water Buffalo", "Dromedary", "Red Deer", "Sheep", "Wildebeest"]
 
 # Density branch (Option B) configuration
 density_loss_coef = 1.0

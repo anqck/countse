@@ -374,8 +374,8 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         # assert exemp_count == 3
         img, target = self.prepare(img, target)
         target['exemplars'] = target['boxes'][-3:]
-        # target['boxes'] = target['boxes'][:-3]
-        # target['labels'] = target['labels'][:-3]
+        target['boxes'] = target['boxes'][:-3]
+        target['labels'] = target['labels'][:-3]
         
         
         if self._transforms is not None:

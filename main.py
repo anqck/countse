@@ -25,7 +25,7 @@ from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 
 from groundingdino.util.utils import clean_state_dict
-
+import wandb
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
@@ -72,6 +72,7 @@ def get_args_parser():
     parser.add_argument("--local-rank", type=int, help='local rank for DistributedDataParallel')
     parser.add_argument('--amp', action='store_true',
                         help="Train with mixed precision")
+    parser.add_argument("--wandb", action="store_true")
     return parser
 
 
@@ -88,6 +89,24 @@ def build_model_main(args):
 def main(args):
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpuid
     utils.setup_distributed(args)
+
+    if args.wandb:        
+        run = wandb.init(
+            # Set the wandb entity where your project will be logged (generally your team name).
+            entity="anqck-counting-00",
+            # Set the wandb project where this run will be logged.
+            project="AnimalCounting39_CountSE_density",
+            # Track hyperparameters and run metadata.
+            config=args,
+        )
+        args.output_dir = os.path.join(args.output_dir, run.name)
+        
+        run.define_metric("val_mae", summary="min")
+        run.define_metric("val_rmse", summary="min")
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+
     # load cfg file and update the args
     print("Loading config file from {}".format(args.config_file))
     time.sleep(args.rank * 0.02)
@@ -108,6 +127,9 @@ def main(args):
         else:
             raise ValueError("Key {} can used by args only".format(k))
 
+    if args.wandb:
+        run.config.update(args, allow_val_change=True)
+        
     # update some new args temporally
     if not getattr(args, 'debug', None):
         args.debug = False
@@ -203,7 +225,7 @@ def main(args):
         data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                     collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
-    data_loader_val = DataLoader(dataset_val, 4, sampler=sampler_val,
+    data_loader_val = DataLoader(dataset_val, 1, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
     if args.onecyclelr:
@@ -259,7 +281,7 @@ def main(args):
     
     if args.eval:
         os.environ['EVAL_FLAG'] = 'TRUE'
-        test_stats, coco_evaluator = evaluate(model, model_without_ddp, criterion, postprocessors,
+        val_mae, test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
                                               data_loader_val, base_ds, device, args.output_dir, wo_class_error=wo_class_error, args=args)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
