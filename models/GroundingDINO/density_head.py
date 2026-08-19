@@ -5,6 +5,9 @@
 # Consumes the post-encoder, text-conditioned `memory`, fused by
 # FeatureFusionNeck into a single stride-8 map.
 # ------------------------------------------------------------------------
+import math
+from typing import Sequence
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -73,25 +76,67 @@ class DensityDecoder(nn.Module):
         return [self.reg_layer2(x2), mu, mu_normed]
 
 
-def generate_gt_density(boxes, size, stride=8, device=None):
-    """Generate the ground-truth density map for a single image.
+def generate_gt_density(
+    pts: torch.Tensor,
+    shape: torch.Tensor | Sequence[int],
+    s_factor: float = 8.0,
+    normalize: bool = False,
+) -> torch.Tensor:
+    """
+    Generate per-point continuous GT Gaussian density maps on GPU.
 
     Args:
-        boxes: normalized cxcywh ground-truth boxes, shape [K, 4], range [0, 1].
-        size: post-transform, pre-padding image size [h, w] (pixels).
-        stride: downsampling factor of the density map (8 == 1/8).
-        device: torch device for the output tensor.
+        pts (torch.Tensor[float32]): [N, 2] normalized coordinates (x, y) in range [0, 1].
+            Can be passed directly from bounding box centers `boxes[:, :2]`.
+        shape (tuple[int, int] | Sequence[int]): The (H, W) spatial resolution of the sampled canvas.
+        s_factor (float): Divisor used to derive Gaussian standard deviation (sigma)
+            from the 1st nearest neighbor distance.
+        normalize (bool): If True, normalizes each map such that the 2D continuous
+            integral equals 1. If False, peak amplitude at point center is 1.
 
     Returns:
-        Density map of shape [1, h // stride, w // stride] over the valid
-        (non-padded) region of the image.
+        torch.Tensor[float32]: [N, H, W] Gaussian density maps for each GT point.
     """
-    h, w = int(size[0]), int(size[1])
-    h_ds, w_ds = h // stride, w // stride
-    density = torch.zeros((1, h_ds, w_ds), device=device)
-    # TODO: implement
-    #   - convert normalized box centers (boxes[:, :2]) to pixel coords via `size`
-    #   - round to a `stride`-downsampled grid (like the donor `gen_discrete_map`)
-    #   - place a unit impulse at each point, then Gaussian blur with the donor's
-    #     adaptive sigma convention (see `mem:density-branch/gt-kernel`).
+    H, W = int(shape[0]), int(shape[1])
+    N = pts.shape[0]
+
+    if N == 0:
+        return torch.zeros((0, H, W), dtype=torch.float32, device=pts.device)
+
+    # 1. Denormalize coordinates: x -> [0, W], y -> [0, H]
+    scale = torch.tensor([W, H], dtype=torch.float32, device=pts.device)
+    pts_px = pts[:, :2] * scale  # [N, 2] -> col 0: x (pixels), col 1: y (pixels)
+
+    x_center = pts_px[:, 0:1]  # [N, 1]
+    y_center = pts_px[:, 1:2]  # [N, 1]
+
+    # 2. Compute adaptive bandwidth (sigma) via nearest neighbor distance
+    if N == 1:
+        # Fallback for single object: scale relative to image average dimension
+        sigma = (float(H + W) / 2.0) / (4.0 * s_factor)
+    else:
+        dists = torch.cdist(pts_px, pts_px, p=2.0)
+        dists.fill_diagonal_(torch.inf)
+        knn_dists, _ = torch.topk(dists, k=1, largest=False, dim=-1)
+        sigma = (knn_dists.mean() / s_factor).clamp(min=1e-4).item()
+
+    inv_two_var = 1.0 / (2.0 * (sigma**2))
+
+    # 3. 1D Coordinate grids along height (Y) and width (X)
+    # [1, H]
+    y_grid = torch.arange(H, dtype=torch.float32, device=pts.device).unsqueeze(0)
+    # [1, W]
+    x_grid = torch.arange(W, dtype=torch.float32, device=pts.device).unsqueeze(0)
+
+    # 4. Separable 1D Gaussian evaluations: O(N * (H + W))
+    gy = torch.exp(-((y_grid - y_center) ** 2) * inv_two_var)  # [N, H]
+    gx = torch.exp(-((x_grid - x_center) ** 2) * inv_two_var)  # [N, W]
+
+    # 5. Outer product broadcasting: [N, H, 1] * [N, 1, W] -> [N, H, W]
+    density = gy.unsqueeze(-1) * gx.unsqueeze(-2)
+
+    # 6. Integral normalization
+    if normalize:
+        density = density / (2.0 * math.pi * (sigma**2))
+
     return density

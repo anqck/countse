@@ -791,22 +791,41 @@ class SetCriterion(nn.Module):
         return batch_idx, tgt_idx
 
     def loss_density(self, outputs, targets, indices, num_boxes):
-        """Counting loss L_D = |sum(D) - K|, mean over batch (donor convention).
+        """Density loss L_D: masked L1 between predicted and GT density maps.
 
         Padding-aware: `targets[j]['size']` is the post-transform, pre-padding
-        image size, so only the valid stride-8 region is summed.
+        image size. GT density is generated per-point at stride-8 resolution
+        over the valid region, summed into a single channel, then padded to
+        the batch's padded size; loss is masked to the valid region only.
         """
         density = outputs['density_map']  # (bs, 1, H/8, W/8)
-        abs_errs = []
-        for j, t in enumerate(targets):
-            K = len(t['labels'])
-            h, w = int(t['size'][0]), int(t['size'][1])
-            h_ds, w_ds = h // 8, w // 8
-            d_valid = density[j, 0, :h_ds, :w_ds]
-            _ = generate_gt_density(t['boxes'], t['size'], stride=8, device=density.device)
-            abs_errs.append((d_valid.sum() - K).abs())
-        losses = {'loss_density': torch.stack(abs_errs).mean()}
-        return losses
+        bs, _, H_pad, W_pad = density.shape
+
+        gt_densities = []
+        for t in targets:
+            pts = t['boxes'][:, :2]
+            H_tgt, W_tgt = int(t['size'][0]) // 8, int(t['size'][1]) // 8
+            per_point = generate_gt_density(
+                pts=pts, shape=(H_tgt, W_tgt), s_factor=8.0, normalize=True
+            )
+            gt_density = per_point.sum(0, keepdim=True)  # [1, H_tgt, W_tgt]
+            pad_w = max(0, W_pad - W_tgt)
+            pad_h = max(0, H_pad - H_tgt)
+            if pad_w > 0 or pad_h > 0:
+                gt_density = F.pad(gt_density, (0, pad_w, 0, pad_h))
+            gt_densities.append(gt_density[:, :H_pad, :W_pad])
+
+        target_densities = torch.stack(gt_densities, dim=0).to(density.device)
+
+        valid_mask = torch.zeros((bs, H_pad, W_pad), dtype=torch.bool, device=density.device)
+        for b, t in enumerate(targets):
+            valid_mask[b, :int(t['size'][0]) // 8, :int(t['size'][1]) // 8] = True
+
+        diff = (density - target_densities).abs()
+        num_valid_pixels = valid_mask.sum().clamp(min=1.0)
+        loss_density = (diff[:, 0] * valid_mask).sum() / num_valid_pixels
+
+        return {'loss_density': loss_density}
 
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
