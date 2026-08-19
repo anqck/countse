@@ -237,6 +237,7 @@ def evaluate(
     print("Input text prompt:", caption)
 
     abs_errs = []
+    density_abs_errs = []
     for samples, targets in metric_logger.log_every(data_loader, 10, header, logger=logger):
         samples = samples.to(device)
 
@@ -260,6 +261,13 @@ def evaluate(
             targets,
             tokenized_captions,
             input_captions)
+        if 'density_map' in outputs:
+            density_map = outputs['density_map']  # (bs, 1, H/8, W/8)
+            for j, t in enumerate(targets):
+                h, w = int(t['size'][0]) // 8, int(t['size'][1]) // 8
+                pred_cnt = density_map[j, 0, :h, :w].sum().item()
+                gt_cnt = len(t['labels'])
+                density_abs_errs.append(np.abs(gt_cnt - pred_cnt))
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
 
         results = postprocessors['bbox'](outputs, orig_target_sizes)
@@ -326,6 +334,10 @@ def evaluate(
     count_rmse = (np.array(abs_errs) ** 2).mean() ** (1/2)
     print("# of Images Tested: " + str(len(abs_errs)))
     print("MAE: " + str(count_mae) + ", RMSE: " + str(count_rmse))
+    if density_abs_errs:
+        density_mae = sum(density_abs_errs) / len(density_abs_errs)
+        density_rmse = (np.array(density_abs_errs) ** 2).mean() ** (1/2)
+        print("Density MAE: {}, Density RMSE: {}".format(density_mae, density_rmse))
     if args.save_results:
         import os.path as osp
         
