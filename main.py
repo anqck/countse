@@ -129,7 +129,7 @@ def main(args):
 
     if args.wandb:
         run.config.update(args, allow_val_change=True)
-        
+
     # update some new args temporally
     if not getattr(args, 'debug', None):
         args.debug = False
@@ -327,7 +327,7 @@ def main(args):
                 utils.save_on_master(weights, checkpoint_path)
                 
         # eval
-        val_mae, test_stats, coco_evaluator = evaluate(
+        bins_result, bins_result_den, val_mae, val_rmse, val_mae_den, val_rmse_den , test_stats, coco_evaluator = evaluate(
             model,
             criterion,
             postprocessors,
@@ -354,6 +354,17 @@ def main(args):
             **{f'train_{k}': v for k, v in train_stats.items()},
             **{f'test_{k}': v for k, v in test_stats.items()},
         }
+
+        if args.wandb:
+            run.log({
+                **bins_result,
+                **bins_result_den,
+                **train_stats,
+                "val_mae": val_mae,
+                "val_rmse": val_rmse,
+                "dens_mae": val_mae_den, 
+                 "dens_rmse": val_rmse_den,
+            })
 
 
         try:

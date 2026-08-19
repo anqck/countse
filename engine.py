@@ -118,6 +118,12 @@ def print_bins_result(counts):
             "".join(f"{y[0]:.4f}\t{y[1]:.4f}\t" for y in current_metrics).rstrip("\t")
         )
 
+    return {
+        f"{h}_{suffix}": val
+        for h, (mae, rmse) in zip(headers, values)
+        for suffix, val in (("MAE", mae), ("RMSE", rmse))
+    }    
+
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
@@ -475,8 +481,8 @@ def evaluate(
         density_rmse = (np.array(density_abs_errs) ** 2).mean() ** (1/2)
         print("Density MAE: {}, Density RMSE: {}".format(density_mae, density_rmse))
 
-    print_bins_result(counts)
-    print_bins_result(counts_den)
+    bins_result = print_bins_result(counts)
+    bins_result_den = print_bins_result(counts_den)
 
     if args.save_results:
         import os.path as osp
@@ -514,6 +520,6 @@ def evaluate(
 
 
 
-    return count_mae, stats, coco_evaluator
+    return bins_result, bins_result_den, count_mae, count_rmse, density_mae, density_rmse , stats, coco_evaluator
 
 
