@@ -2,6 +2,7 @@
 """
 Train and eval functions used in main.py
 """
+
 from random import sample
 from types import coroutine
 
@@ -28,6 +29,7 @@ from util.misc import nested_tensor_from_tensor_list
 from datasets_inference.cocogrounding_eval import CocoGroundingEvaluator
 
 from datasets_inference.panoptic_eval import PanopticEvaluator
+
 # from segment_anything import sam_model_registry, SamPredictor
 from datasets_inference.transforms import RandomResize
 from scipy.stats import bernoulli
@@ -147,8 +149,8 @@ def train_one_epoch(
         loss_value = losses_reduced_scaled.item()
 
         if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
-            print(loss_dict_reduced)
+            # print("Loss is {}, stopping training".format(loss_value))
+            # print(loss_dict_reduced)
             sys.exit(1)
 
         # amp backward function
@@ -227,7 +229,7 @@ def numpy_2_cv2(np_img):
 def tt_norm_sam(predictor, pred_cnt, image, exemplars, size, points):
     e_cnt = 0
     avg_cnt = 0
-    (h, w) = (size[0], size[1])
+    h, w = (size[0], size[1])
     xv, yv = np.meshgrid(np.arange(w), np.arange(h), indexing="xy")
     image_cv = numpy_2_cv2(image)
     predictor.set_image(image_cv)
@@ -285,7 +287,7 @@ def tt_norm_sam(predictor, pred_cnt, image, exemplars, size, points):
 def tt_norm(pred_cnt, exemplars, size, points):
     e_cnt = 0
     avg_cnt = 0
-    (h, w) = (size[0], size[1])
+    h, w = (size[0], size[1])
     for exemp in exemplars:
         # Get number of points inside exemplar.
         in_exemp = (points[:, 0] * w > exemp[0]) * (points[:, 0] * w < exemp[2])
@@ -307,7 +309,7 @@ def tt_norm(pred_cnt, exemplars, size, points):
 
 
 def crop(sample, crop_width, crop_height, overlap_width, overlap_height):
-    (h, w) = sample.shape[1], sample.shape[2]
+    h, w = sample.shape[1], sample.shape[2]
 
     samples_cropped = []
     start_y = 0
@@ -391,14 +393,13 @@ def get_count_errs(
         sample_logits = sample_logits[box_mask, :]
         sample_boxes = sample_boxes[box_mask, :]
 
-
         text_mask = (sample_logits[:, 1:end_idx] > text_threshold).sum(dim=-1) == (
             end_idx - 1
         )
         sample_logits = sample_logits[text_mask, :]
         sample_boxes = sample_boxes[text_mask, :]
 
-        targets[0]['sample_boxes'] = sample_boxes
+        targets[0]["sample_boxes"] = sample_boxes
 
         gt_count = targets[sample_ind]["labels_uncropped"].shape[0]
         pred_cnt = sample_logits.shape[0]
@@ -408,7 +409,7 @@ def get_count_errs(
             print("Detected high number of objects, cropping...")
 
             # Crop image.
-            (h, w) = size[0], size[1]
+            h, w = size[0], size[1]
 
             # Get crop size.
             obj_width = 40
@@ -495,8 +496,8 @@ def get_count_errs(
                     pred_crop_cnt = 0
                     for box in sample_boxes_cropped:
                         # Refer to region definitions in [cropping.pdf] to understand A, B, C, D, E, F, G, H, & I
-                        (x, y) = crop_width * box[0], crop_height * box[1]
-                        (transformed_x, transformed_y) = (x + start_x).item(), (
+                        x, y = crop_width * box[0], crop_height * box[1]
+                        transformed_x, transformed_y = (x + start_x).item(), (
                             y + start_y
                         ).item()
 
@@ -780,7 +781,7 @@ def get_count_errs(
             print("Detected high number of objects, cropping...")
 
             # When using the simple crop, just divide image into 4 regions and sum the predicted count for each region.
-            (h, w) = size[0], size[1]
+            h, w = size[0], size[1]
             sample_top_left = F.resize(sample[:, : (h // 2), : (w // 2)], (h, w))
             sample_bot_left = F.resize(sample[:, (h // 2) : h, : (w // 2)], (h, w))
             sample_top_right = F.resize(sample[:, : (h // 2), (w // 2) : w], (h, w))
@@ -854,10 +855,9 @@ def get_count_errs(
 
         abs_errs.append(np.abs(gt_count - pred_cnt))
     err_percent = np.abs(gt_count - pred_cnt) / gt_count
-    targets[0]['err_percent'] = err_percent
+    targets[0]["err_percent"] = err_percent
     print("Current error percent: ", err_percent)
     return abs_errs
-
 
 
 @torch.no_grad()
@@ -926,8 +926,11 @@ def evaluate(
         data_loader, 10, header, logger=logger
     ):
         samples = samples.to(device)
-        image_path = targets[0]['path']
-        targets = [{k: to_device(v, device) if k != 'path' else v for k, v in t.items()} for t in targets]
+        image_path = targets[0]["path"]
+        targets = [
+            {k: to_device(v, device) if k != "path" else v for k, v in t.items()}
+            for t in targets
+        ]
         exemplars = [t["exemplars"][: args.num_exemplars].to(device) for t in targets]
 
         bs = samples.tensors.shape[0]
@@ -936,8 +939,8 @@ def evaluate(
             input_captions = [" ." for target in targets]
 
         print("input_captions: " + str(input_captions))
-        print('image path: ', image_path)
-        with (torch.cuda.amp.autocast(enabled=args.amp)):
+        print("image path: ", image_path)
+        with torch.cuda.amp.autocast(enabled=args.amp):
             # Use 'label' of 0 at inference since only input a single text prompt instead of all COCO classes.
             outputs = model(
                 samples,
@@ -964,9 +967,9 @@ def evaluate(
         image_pil, image = load_image(image_path)
         size = image_pil.size
         pred_dict = {
-            "boxes": targets[0]['sample_boxes'].clone().to('cpu'),
+            "boxes": targets[0]["sample_boxes"].clone().to("cpu"),
             "size": [size[1], size[0]],  # H,W
-            "path": targets[0]['path']
+            "path": targets[0]["path"],
         }
         # image_with_box = plot_boxes_to_image(image_pil, pred_dict)
 
@@ -1056,13 +1059,13 @@ def evaluate(
         panoptic_evaluator.synchronize_between_processes()
 
     # accumulate predictions from all images
-    
+
     with contextlib.redirect_stdout(io.StringIO()):
         # Suppress print output from unused [GroundingDINO] functions.
         if coco_evaluator is not None:
             coco_evaluator.accumulate()
             coco_evaluator.summarize()
-    
+
     panoptic_res = None
     if panoptic_evaluator is not None:
         panoptic_res = panoptic_evaluator.summarize()
@@ -1088,17 +1091,17 @@ def plot_boxes_to_image(image_pil, tgt):
     H, W = tgt["size"]
     boxes = tgt["boxes"]
 
-    path = tgt['path']
-    path = path.split('/')[-1]
+    path = tgt["path"]
+    path = path.split("/")[-1]
 
     draw = ImageDraw.Draw(image_pil)
 
     try:
-        font = ImageFont.truetype("arial.ttf", 20) 
+        font = ImageFont.truetype("arial.ttf", 20)
     except IOError:
         font = ImageFont.load_default()
 
-    draw.text((10, 10), f'Path: {path}', fill="white", font=font)
+    draw.text((10, 10), f"Path: {path}", fill="white", font=font)
 
     # draw boxes and masks
     for box in boxes:
@@ -1115,9 +1118,9 @@ def plot_boxes_to_image(image_pil, tgt):
 
         draw.rectangle([x0, y0, x1, y1], outline=color, width=6)
 
-    plt.figure(figsize=(8, 8))  
-    plt.imshow(image_pil.convert('RGB'))  
-    plt.axis('off') 
+    plt.figure(figsize=(8, 8))
+    plt.imshow(image_pil.convert("RGB"))
+    plt.axis("off")
     plt.show()
     return image_pil
 
