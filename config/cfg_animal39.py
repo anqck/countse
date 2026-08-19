@@ -118,5 +118,5 @@ label_list = ["African Forest Elephant", "African Savanna Elephant", "American B
 val_label_list = ["American Bison", "Common Eland", "Cow", "Domestic Water Buffalo", "Dromedary", "Red Deer", "Sheep", "Wildebeest"]
 
 # Density branch (Option B) configuration
-density_loss_coef = 1.0
+density_loss_coef = 0.5
 
