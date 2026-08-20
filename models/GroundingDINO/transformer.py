@@ -183,9 +183,10 @@ class Transformer(nn.Module):
 
         # for two stage
         self.two_stage_type = two_stage_type
-        assert two_stage_type in ["no", "standard"], (
-            f"unknown param {two_stage_type} of two_stage_type"
-        )
+        assert two_stage_type in [
+            "no",
+            "standard",
+        ], f"unknown param {two_stage_type} of two_stage_type"
         if two_stage_type == "standard":
             # anchor selection at the output of encoder
             self.enc_output = nn.Linear(d_model, d_model)
@@ -345,9 +346,9 @@ class Transformer(nn.Module):
         for idx, layer in enumerate(self.visual_density_cross_attn_layers):
             memory = layer(
                 visual_ft=memory,
-                density_ft=x2
-                if self.visual_density_cross_attn_with_x2
-                else density_feats,
+                density_ft=(
+                    x2 if self.visual_density_cross_attn_with_x2 else density_feats
+                ),
                 density_attn_mask=stride8_density_mask,
             )
 
@@ -498,7 +499,7 @@ class Transformer(nn.Module):
         # hs_enc: (n_enc+1, bs, nq, d_model) or (1, bs, nq, d_model) or None
         # ref_enc: sigmoid coordinates. \
         #           (n_enc+1, bs, nq, query_dim) or (1, bs, nq, query_dim) or None
-        # density_feats: bs, 256, H/8, W/8
+        # density_feats: bs, (H/8) * (W/8), 256
         # density_map: bs, 1, H/8, W/8
 
 

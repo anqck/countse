@@ -25,7 +25,7 @@ class VisionDensityMultiHeadCrossAttn(nn.Module):
         assert self.head_dim * self.num_heads == self.embed_dim, (
             f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`: {self.num_heads})."
         )
-        self.scale = self.head_dim ** (-0.5)
+        # self.scale = self.head_dim ** (-0.5)
         self.dropout = dropout
 
         self.query_proj = nn.Linear(self.visual_dim, self.embed_dim)
@@ -33,9 +33,9 @@ class VisionDensityMultiHeadCrossAttn(nn.Module):
         self.value_proj = nn.Linear(self.density_dim, self.embed_dim)
         self.visual_out_proj = nn.Linear(self.embed_dim, self.visual_dim)
 
-        self.stable_softmax_2d = True
-        self.clamp_min_for_underflow = True
-        self.clamp_max_for_overflow = True
+        # self.stable_softmax_2d = True
+        # self.clamp_min_for_underflow = True
+        # self.clamp_max_for_overflow = True
 
         self._reset_parameters()
 
@@ -68,31 +68,39 @@ class VisionDensityMultiHeadCrossAttn(nn.Module):
         nn.init.xavier_uniform_(self.visual_out_proj.weight)
         self.visual_out_proj.bias.data.fill_(0)
 
-
     def forward(
         self,
         visual_ft: torch.Tensor,
         density_ft: torch.Tensor,
         density_attn_mask: torch.Tensor = None,
     ) -> torch.Tensor:
+        """
+        Perform visual-density map cross attention
+
+        Args:
+            visual_ft (torch.Tensor): bs, n_vis, dim
+            density_ft (torch.Tensor): bs, n_density, dim
+            density_attn_mask (torch.Tensor, optional): bs, n_density
+
+        Returns:
+            torch.Tensor: bs, n_vis, dim
+        """
         bsz, tgt_len, _ = visual_ft.size()
-        
-        # 1. Chiếu (Project) và định dạng Q, K, V thành [bs, num_heads, seq_len, head_dim]
-        # Không cần nhân self.scale ở đây vì SDPA sẽ tự động scale
+
+        # Q, K, V [bs, num_heads, seq_len, head_dim]
+        # No need to multiply self.scale; SPDA will scale.
         q = self._shape(self.query_proj(visual_ft), tgt_len, bsz)
         k = self._shape(self.key_proj(density_ft), -1, bsz)
         v = self._shape(self.value_proj(density_ft), -1, bsz)
 
-        # 2. Xử lý Mask cho SDPA
         attn_mask = None
         if density_attn_mask is not None:
-            # PyTorch SDPA yêu cầu boolean mask: True là vị trí HỢP LỆ (được tham gia attention)
-            # Nếu mask của bạn đang dùng True cho các vị trí padding (cần loại bỏ), hãy đảo ngược nó
-            attn_mask = ~density_attn_mask 
-            # Mở rộng kích thước thành [bs, 1, 1, src_len] để broadcasting
+            # SDPA boolean mask True=valid (attetion)
+            # Input mask True=padding (invalid)
+            attn_mask = ~density_attn_mask.bool()
             attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)
 
-        # 3. Tính toán Attention 
+        # [bsz, self.num_heads, tgt_len, self.head_dim]
         attn_output = F.scaled_dot_product_attention(
             query=q,
             key=k,
@@ -101,14 +109,14 @@ class VisionDensityMultiHeadCrossAttn(nn.Module):
             dropout_p=self.dropout,
         )
 
-        # 4. Định dạng lại output
+        # [bsz, tgt_len, self.embed_dim]
+        # This .view() is possible because previously constructor has asserted
+        # nheads * head_dims == embed_dim
         attn_output = (
-            attn_output.transpose(1, 2)
-            .contiguous()
-            .view(bsz, tgt_len, self.embed_dim)
+            attn_output.transpose(1, 2).contiguous().view(bsz, tgt_len, self.embed_dim)
         )
+        # [bsz, tgt_len, self.visual_dim]
         return self.visual_out_proj(attn_output)
-
 
     # def forward(
     #     self,
