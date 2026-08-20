@@ -72,7 +72,7 @@ class VisionDensityMultiHeadCrossAttn(nn.Module):
         self,
         visual_ft: torch.Tensor,
         density_ft: torch.Tensor,
-        density_attn_mask: torch.Tensor | None = None,
+        density_attn_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Perform visual-density map cross attention
@@ -207,7 +207,7 @@ class VisionDensityAttnBlock(nn.Module):
         self,
         visual_ft: torch.Tensor,
         density_ft: torch.Tensor,
-        density_attn_mask: torch.Tensor | None = None,
+        density_attn_mask: torch.Tensor = None,
     ):
         v_norm = self.visual_layer_norm(visual_ft)
         d_norm = self.density_layer_norm(density_ft)
