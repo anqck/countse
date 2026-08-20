@@ -23,6 +23,8 @@ import torch.utils.checkpoint as checkpoint
 from torch import Tensor, nn
 
 from groundingdino.util.misc import inverse_sigmoid
+
+from .density_head import DensityDecoder, FeatureFusionNeck
 from .fuse_modules import BiAttentionBlock
 from .ms_deform_attn import MultiScaleDeformableAttention as MSDeformAttn
 from .transformer_vanilla import TransformerEncoderLayer
@@ -32,9 +34,9 @@ from .utils import (
     _get_clones,
     gen_encoder_output_proposals,
     gen_sineembed_for_position,
-    get_sine_pos_embed, ContrastiveEmbed,
+    get_sine_pos_embed,
 )
-
+from .vision_to_density_ft_attn import VisionDensityAttnBlock
 
 
 class Transformer(nn.Module):
@@ -71,6 +73,8 @@ class Transformer(nn.Module):
         text_dropout=0.1,
         fusion_dropout=0.1,
         fusion_droppath=0.0,
+        visual_density_cross_attn_with_x2: bool = False,
+        visual_density_cross_attn_num_layers: int = 1,
     ):
         super().__init__()
 
@@ -83,7 +87,13 @@ class Transformer(nn.Module):
 
         # choose encoder layer type
         encoder_layer = DeformableTransformerEncoderLayer(
-            d_model, dim_feedforward, dropout, activation, num_feature_levels, nhead, enc_n_points
+            d_model,
+            dim_feedforward,
+            dropout,
+            activation,
+            num_feature_levels,
+            nhead,
+            enc_n_points,
         )
 
         if use_text_enhancer:
@@ -156,7 +166,9 @@ class Transformer(nn.Module):
 
         if num_feature_levels > 1:
             if self.num_encoder_layers > 0:
-                self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
+                self.level_embed = nn.Parameter(
+                    torch.Tensor(num_feature_levels, d_model)
+                )
             else:
                 self.level_embed = None
 
@@ -171,8 +183,8 @@ class Transformer(nn.Module):
 
         # for two stage
         self.two_stage_type = two_stage_type
-        assert two_stage_type in ["no", "standard"], "unknown param {} of two_stage_type".format(
-            two_stage_type
+        assert two_stage_type in ["no", "standard"], (
+            f"unknown param {two_stage_type} of two_stage_type"
         )
         if two_stage_type == "standard":
             # anchor selection at the output of encoder
@@ -185,6 +197,24 @@ class Transformer(nn.Module):
 
         self.enc_out_class_embed = None
         self.enc_out_bbox_embed = None
+
+        # density branch (Option B): post-encoder memory -> stride-8 density map
+        self.density_neck = FeatureFusionNeck(d_model, d_model)
+        self.density_decoder = DensityDecoder()
+        self.visual_density_cross_attn_with_x2 = visual_density_cross_attn_with_x2
+        self.visual_density_cross_attn_block = VisionDensityAttnBlock(
+            visual_dim=d_model,
+            density_dim=d_model // 2 if visual_density_cross_attn_with_x2 else d_model,
+            embed_dim=dim_feedforward // 2,
+            num_heads=nhead // 2,
+            dropout=fusion_dropout,
+            drop_path=fusion_droppath,
+        )
+        self.visual_density_cross_attn_layers = _get_clones(
+            self.visual_density_cross_attn_block,
+            visual_density_cross_attn_num_layers,
+            False,
+        )
 
         self._reset_parameters()
 
@@ -218,7 +248,7 @@ class Transformer(nn.Module):
         pos_embeds,
         tgt,
         attn_mask=None,
-        text_dict=None
+        text_dict=None,
     ):
         """
         Input:
@@ -266,7 +296,7 @@ class Transformer(nn.Module):
         #########################################################
         # Begin Encoder
         #########################################################
-        
+
         memory, memory_text = self.encoder(
             src_flatten,
             pos=lvl_pos_embed_flatten,
@@ -280,7 +310,7 @@ class Transformer(nn.Module):
             position_ids=text_dict["position_ids"],
             text_self_attention_masks=text_dict["text_self_attention_masks"],
         )
-        
+
         #########################################################
         # End Encoder
         # - memory: bs, \sum{hw}, c
@@ -289,20 +319,53 @@ class Transformer(nn.Module):
         # - enc_intermediate_output: None or (nenc+1, bs, nq, c) or (nenc, bs, nq, c)
         # - enc_intermediate_refpoints: None or (nenc+1, bs, nq, c) or (nenc, bs, nq, c)
         #########################################################
+
+        # density branch (Option B): consume post-encoder `memory`, fuse to a
+        # stride-8 map, produce a density map + density-aware features.
+        memory_t = memory.transpose(1, 2)  # [bs, 256, sum(hw)]
+        boundaries = [int(h) * int(w) for h, w in spatial_shapes]
+        mem_maps = torch.split(memory_t, boundaries, dim=2)
+        mem_maps = [
+            torch.unflatten(m, 2, (int(h), int(w)))
+            for m, (h, w) in zip(mem_maps, spatial_shapes)
+        ]
+        fused = self.density_neck(mem_maps)  # (bs, 256, H/8, W/8)
+        # density_feats bs, 256, H/8, W/8
+        # density_map bs, 1, H/8, W/8
+        # x2 bs, 128, H/8, W/8
+        density_feats, density_map, x2 = self.density_decoder(fused)
+
+        # Vision-Density cross-attention
+        # bs, (h/8) * (w/8)
+        stride8_density_mask = torch.split(mask_flatten, boundaries, dim=1)[0]
+        density_feats = density_feats.flatten(2, 3).transpose(1, 2)
+        x2 = x2.flatten(2, 3).transpose(1, 2)
+
+        # TODO: check
+        for idx, layer in enumerate(self.visual_density_cross_attn_layers):
+            memory = layer(
+                visual_ft=memory,
+                density_ft=x2
+                if self.visual_density_cross_attn_with_x2
+                else density_feats,
+                density_attn_mask=stride8_density_mask,
+            )
+
         text_dict["encoded_text"] = memory_text
         # if os.environ.get("SHILONG_AMP_INFNAN_DEBUG") == '1':
         #     if memory.isnan().any() | memory.isinf().any():
         #         import ipdb; ipdb.set_trace()
 
-
-        if self.two_stage_type == "standard":  #把encoder的输出作为proposal
+        if self.two_stage_type == "standard":  # 把encoder的输出作为proposal
             output_memory, output_proposals = gen_encoder_output_proposals(
                 memory, mask_flatten, spatial_shapes
             )
             output_memory = self.enc_output_norm(self.enc_output(output_memory))
 
             if text_dict is not None:
-                enc_outputs_class_unselected = self.enc_out_class_embed(output_memory, text_dict)
+                enc_outputs_class_unselected = self.enc_out_class_embed(
+                    output_memory, text_dict
+                )
             else:
                 enc_outputs_class_unselected = self.enc_out_class_embed(output_memory)
 
@@ -317,7 +380,9 @@ class Transformer(nn.Module):
 
             # gather boxes
             refpoint_embed_undetach = torch.gather(
-                enc_outputs_coord_unselected, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
+                enc_outputs_coord_unselected,
+                1,
+                topk_proposals.unsqueeze(-1).repeat(1, 1, 4),
             )  # unsigmoid
             refpoint_embed_ = refpoint_embed_undetach.detach()
             init_box_proposal = torch.gather(
@@ -326,7 +391,9 @@ class Transformer(nn.Module):
 
             # gather tgt
             tgt_undetach = torch.gather(
-                output_memory, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model)
+                output_memory,
+                1,
+                topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model),
             )
 
             if self.embed_init_tgt:
@@ -367,11 +434,10 @@ class Transformer(nn.Module):
             init_box_proposal = refpoint_embed_.sigmoid()
 
         else:
-            raise NotImplementedError("unknown two_stage_type {}".format(self.two_stage_type))
+            raise NotImplementedError(
+                "unknown two_stage_type {}".format(self.two_stage_type)
+            )
         #########################################################
-
-
-
         # End preparing tgt
         # - tgt: bs, NQ, d_model
         # - refpoint_embed(unsigmoid): bs, NQ, d_model
@@ -381,7 +447,7 @@ class Transformer(nn.Module):
         # Begin Decoder
         #########################################################
 
-        #memory  torch.Size([2, 16320, 256])
+        # memory  torch.Size([2, 16320, 256])
 
         # import pdb;pdb.set_trace()
         hs, references = self.decoder(
@@ -418,14 +484,22 @@ class Transformer(nn.Module):
         # ref_enc: (n_enc+1, bs, nq, query_dim) or (1, bs, nq, query_dim) or (n_enc, bs, nq, d_model) or None
         #########################################################
 
-        return hs, references, hs_enc, ref_enc, init_box_proposal, memory, spatial_shapes
+        return (
+            hs,
+            references,
+            hs_enc,
+            ref_enc,
+            init_box_proposal,
+            density_feats,
+            density_map,
+        )
         # hs: (n_dec, bs, nq, d_model)
         # references: sigmoid coordinates. (n_dec+1, bs, bq, 4)
         # hs_enc: (n_enc+1, bs, nq, d_model) or (1, bs, nq, d_model) or None
         # ref_enc: sigmoid coordinates. \
         #           (n_enc+1, bs, nq, query_dim) or (1, bs, nq, query_dim) or None
-        # memory: bs, \sum{hw}, c  (post-encoder, for the density branch)
-        # spatial_shapes: nlevel, 2
+        # density_feats: bs, 256, H/8, W/8
+        # density_map: bs, 1, H/8, W/8
 
 
 class TransformerEncoder(nn.Module):
@@ -458,7 +532,9 @@ class TransformerEncoder(nn.Module):
         self.text_layers = []
         self.fusion_layers = []
         if num_layers > 0:
-            self.layers = _get_clones(encoder_layer, num_layers, layer_share=enc_layer_share)
+            self.layers = _get_clones(
+                encoder_layer, num_layers, layer_share=enc_layer_share
+            )
 
             if text_enhance_layer is not None:
                 self.text_layers = _get_clones(
@@ -491,7 +567,6 @@ class TransformerEncoder(nn.Module):
     def get_reference_points(spatial_shapes, valid_ratios, device):
         reference_points_list = []
         for lvl, (H_, W_) in enumerate(spatial_shapes):
-
             ref_y, ref_x = torch.meshgrid(
                 torch.linspace(0.5, H_ - 0.5, H_, dtype=torch.float32, device=device),
                 torch.linspace(0.5, W_ - 0.5, W_, dtype=torch.float32, device=device),
@@ -560,7 +635,9 @@ class TransformerEncoder(nn.Module):
                     .unsqueeze(-1)
                     .repeat(bs, 1, 1)
                 )
-                pos_text = get_sine_pos_embed(pos_text, num_pos_feats=256, exchange_xy=False)
+                pos_text = get_sine_pos_embed(
+                    pos_text, num_pos_feats=256, exchange_xy=False
+                )
             if position_ids is not None:
                 pos_text = get_sine_pos_embed(
                     position_ids[..., None], num_pos_feats=256, exchange_xy=False
@@ -687,10 +764,7 @@ class TransformerDecoder(nn.Module):
         reference_points = refpoints_unsigmoid.sigmoid()
         ref_points = [reference_points]
 
-        
-
         for layer_id, layer in enumerate(self.layers):
-
             if reference_points.shape[-1] == 4:
                 reference_points_input = (
                     reference_points[:, :, None]
@@ -698,7 +772,9 @@ class TransformerDecoder(nn.Module):
                 )  # nq, bs, nlevel, 4
             else:
                 assert reference_points.shape[-1] == 2
-                reference_points_input = reference_points[:, :, None] * valid_ratios[None, :]
+                reference_points_input = (
+                    reference_points[:, :, None] * valid_ratios[None, :]
+                )
             query_sine_embed = gen_sineembed_for_position(
                 reference_points_input[:, :, 0, :]
             )  # nq, bs, 256*2
@@ -807,7 +883,13 @@ class DeformableTransformerEncoderLayer(nn.Module):
         return src
 
     def forward(
-        self, src, pos, reference_points, spatial_shapes, level_start_index, key_padding_mask=None
+        self,
+        src,
+        pos,
+        reference_points,
+        spatial_shapes,
+        level_start_index,
+        key_padding_mask=None,
     ):
         # self attention
         # import ipdb; ipdb.set_trace()
@@ -955,6 +1037,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
 
         return tgt
 
+
 def build_transformer(args):
     return Transformer(
         d_model=args.hidden_dim,
@@ -984,5 +1067,6 @@ def build_transformer(args):
         text_dropout=args.text_dropout,
         fusion_dropout=args.fusion_dropout,
         fusion_droppath=args.fusion_droppath,
+        visual_density_cross_attn_with_x2=args.visual_density_cross_attn_with_x2,
+        visual_density_cross_attn_num_layers=args.visual_density_cross_attn_num_layers,
     )
-

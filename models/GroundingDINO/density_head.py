@@ -29,9 +29,11 @@ class FeatureFusionNeck(nn.Module):
         self.smooth = nn.Conv2d(out_channels, out_channels, 3, padding=1)
 
     def forward(self, features):
-        f0, f1, f2, f3 = features
+        f0, f1, f2, _f3 = features
         # p3 = self.lateral3(f3)
-        p2 = self.lateral2(f2)  #+ F.interpolate(p3, size=f2.shape[-2:], mode="nearest")
+        p2 = self.lateral2(
+            f2
+        )  # + F.interpolate(p3, size=f2.shape[-2:], mode="nearest")
         p1 = self.lateral1(f1) + F.interpolate(p2, size=f1.shape[-2:], mode="nearest")
         p0 = self.lateral0(f0) + F.interpolate(p1, size=f0.shape[-2:], mode="nearest")
         return self.smooth(p0)  # (B, out_channels, H/8, W/8)
@@ -70,10 +72,7 @@ class DensityDecoder(nn.Module):
     def forward(self, x):
         x2 = self.reg_layer(x)
         mu = F.relu(self.density_layer(x2))
-        b = mu.size(0)
-        mu_sum = mu.view(b, -1).sum(1).view(b, 1, 1, 1)
-        mu_normed = mu / (mu_sum + 1e-6)
-        return [self.reg_layer2(x2), mu, mu_normed]
+        return [self.reg_layer2(x2), mu, x2]
 
 
 # def generate_gt_density(
@@ -141,6 +140,7 @@ class DensityDecoder(nn.Module):
 
 #     return density
 
+
 def generate_gt_density(
     pts: torch.Tensor,
     shape,
@@ -201,7 +201,6 @@ def generate_gt_density(
     # 2. Adaptive sigma for EACH point
     # ---------------------------------------------------------
     if N == 1:
-
         sigma = torch.tensor(
             (H + W) / 2.0 / (4.0 * s_factor),
             dtype=torch.float32,
@@ -212,7 +211,6 @@ def generate_gt_density(
         sigma = sigma.reshape(1, 1)
 
     else:
-
         dists = torch.cdist(
             pts_px,
             pts_px,
@@ -225,9 +223,7 @@ def generate_gt_density(
         knn_dists = dists.min(dim=-1).values
         # [N]
 
-        sigma = (
-            knn_dists / s_factor
-        ).clamp(min=1)
+        sigma = (knn_dists / s_factor).clamp(min=1)
 
         # IMPORTANT:
         # [N] -> [N, 1]
@@ -236,9 +232,7 @@ def generate_gt_density(
     # ---------------------------------------------------------
     # 3. Gaussian coefficient
     # ---------------------------------------------------------
-    inv_two_var = 1.0 / (
-        2.0 * sigma.pow(2)
-    )
+    inv_two_var = 1.0 / (2.0 * sigma.pow(2))
     # [N, 1]
 
     # ---------------------------------------------------------
@@ -261,25 +255,16 @@ def generate_gt_density(
     # ---------------------------------------------------------
     # 5. Separable Gaussian
     # ---------------------------------------------------------
-    gy = torch.exp(
-        -((y_grid - y_center).pow(2))
-        * inv_two_var
-    )
+    gy = torch.exp(-((y_grid - y_center).pow(2)) * inv_two_var)
     # [N, H]
 
-    gx = torch.exp(
-        -((x_grid - x_center).pow(2))
-        * inv_two_var
-    )
+    gx = torch.exp(-((x_grid - x_center).pow(2)) * inv_two_var)
     # [N, W]
 
     # ---------------------------------------------------------
     # 6. Outer product
     # ---------------------------------------------------------
-    density = (
-        gy.unsqueeze(-1)
-        * gx.unsqueeze(-2)
-    )
+    density = gy.unsqueeze(-1) * gx.unsqueeze(-2)
     # [N, H, W]
 
     # ---------------------------------------------------------
