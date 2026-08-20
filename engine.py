@@ -69,7 +69,7 @@ def make_interval_nested(df, intervals):
         yield label, df[mask]
 
 
-def print_bins_result(counts):
+def print_bins_result(counts, prefix = ""):
     frame = pd.DataFrame(
         counts,
         columns=["pred_cnt", "gt_cnt"],
@@ -122,7 +122,7 @@ def print_bins_result(counts):
         )
 
     return {
-        f"{h}_{suffix}": val
+        f"{prefix}{h}_{suffix}": val
         for h, (mae, rmse) in zip(headers, values)
         for suffix, val in (("MAE", mae), ("RMSE", rmse))
     }
@@ -531,8 +531,8 @@ def evaluate(
         density_rmse = (np.array(density_abs_errs) ** 2).mean() ** (1 / 2)
         print("Density MAE: {}, Density RMSE: {}".format(density_mae, density_rmse))
 
-    bins_result = print_bins_result(counts)
-    bins_result_den = print_bins_result(counts_den)
+    bins_result = print_bins_result(counts, "")
+    bins_result_den = print_bins_result(counts_den, "den_")
 
     if args.save_results:
         import os.path as osp
