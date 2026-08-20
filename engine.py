@@ -3,29 +3,26 @@
 Train and eval functions used in main.py
 """
 
+import math
+import os
+import random
+import sys
 from pathlib import Path
+from typing import Iterable
 
 import cv2
-import numpy as np
-import math
-import random
-import seaborn as sns
-
-import os
-import sys
-from typing import Iterable
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
-
-from util.utils import to_device
+import numpy as np
+import pandas as pd
+import seaborn as sns
 import torch
+from matplotlib.patches import Rectangle
 
 import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.cocogrounding_eval import CocoGroundingEvaluator
-
 from datasets.panoptic_eval import PanopticEvaluator
-import pandas as pd
+from util.utils import to_device
 
 
 def make_interval_nested(df, intervals):
@@ -69,7 +66,7 @@ def make_interval_nested(df, intervals):
         yield label, df[mask]
 
 
-def print_bins_result(counts, prefix = ""):
+def print_bins_result(counts, prefix=""):
     frame = pd.DataFrame(
         counts,
         columns=["pred_cnt", "gt_cnt"],
@@ -159,7 +156,6 @@ def train_one_epoch(
     for samples, targets in metric_logger.log_every(
         data_loader, print_freq, header, logger=logger
     ):
-
         optimizer.zero_grad()
 
         samples = samples.to(device)
@@ -339,7 +335,7 @@ def get_count_errs(
         #     print("All query logits: " + str(logits[sample_ind]))
         #     print("First query logit: " + str(logits[sample_ind][0]))
         #     print("tokenized caption: " + str(tokenized_captions["input_ids"]))
-        print("Pred Count: " + str(pred_cnt) + ", GT Count: " + str(gt_count))
+        # print("Pred Count: " + str(pred_cnt) + ", GT Count: " + str(gt_count))
 
         abs_errs.append(np.abs(gt_count - pred_cnt))
         abs_errs_density.append(np.abs(gt_count - pred_cnt_den))
