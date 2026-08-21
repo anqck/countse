@@ -4,3 +4,4 @@ checkpoints/**
 checkpoint_best_regular.pth
 logits.npy
 wandb/**
+*.pyd
