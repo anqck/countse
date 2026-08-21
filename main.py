@@ -69,6 +69,11 @@ def get_args_parser():
     parser.add_argument("--find_unused_params", action="store_true")
     parser.add_argument("--save_results", action="store_true")
     parser.add_argument("--save_log", action="store_true")
+    parser.add_argument(
+        "--visualise_density",
+        action="store_true",
+        help="visualise predicted density map on image (eval mode only)",
+    )
 
     # distributed training parameters
     parser.add_argument(

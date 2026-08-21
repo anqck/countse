@@ -22,7 +22,8 @@ import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.cocogrounding_eval import CocoGroundingEvaluator
 from datasets.panoptic_eval import PanopticEvaluator
-from util.utils import to_device
+from util.utils import to_device, renorm
+from util.density_vis import visualise_output_and_save
 
 
 def make_interval_nested(df, intervals):
@@ -425,6 +426,44 @@ def evaluate(
                 )
 
         tokenized_captions = outputs["token"]
+
+        if (
+            args.eval
+            and getattr(args, "visualise_density", False)
+            and "density_map" in outputs
+        ):
+            vis_dir = (
+                os.path.join(output_dir, "density_vis")
+                if output_dir
+                else os.path.join(os.getcwd(), "density_vis")
+            )
+            os.makedirs(vis_dir, exist_ok=True)
+            for j, t in enumerate(targets):
+                h, w = int(t["size"][0]), int(t["size"][1])
+                img = (
+                    renorm(samples.tensors[j, :, :h, :w].detach().cpu())
+                    .permute(1, 2, 0)
+                    .clamp(0, 1)
+                    .numpy()
+                )
+                dm = outputs["density_map"][j, 0, : h // 8, : w // 8].detach().cpu()
+                dm = torch.nn.functional.interpolate(
+                    dm[None, None], size=(h, w), mode="bilinear", align_corners=False
+                )[0, 0]
+                gt_points = (
+                    t["boxes"][:, :2].detach().cpu().numpy()
+                    * torch.tensor([w, h], dtype=torch.float32).numpy()
+                )
+                visualise_output_and_save(
+                    img,
+                    dm,
+                    save_path=os.path.join(vis_dir, f"{t['image_id'].item()}.png"),
+                    gt_points=gt_points,
+                    pred_points=None,
+                    gt_count=len(t["boxes"]),
+                    pred_count=dm.sum().item(),
+                )
+
         abs_err, density_abs_err = get_count_errs(
             samples,
             exemplars,
