@@ -5,9 +5,6 @@
 # Consumes the post-encoder, text-conditioned `memory`, fused by
 # FeatureFusionNeck into a single stride-8 map.
 # ------------------------------------------------------------------------
-import math
-from typing import Sequence
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
