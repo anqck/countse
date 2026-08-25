@@ -457,7 +457,8 @@ def evaluate(
                     .clamp(0, 1)
                     .numpy()
                 )
-                dm = outputs["density_map"][j, 0, : h // 8, : w // 8].detach().cpu()
+                # dm = outputs["density_map"][j, 0, : h // 8, : w // 8].detach().cpu()
+                dm = outputs["density_map"][j, 0]
                 dm_pred_count = dm.sum().item()
                 dm = torch.nn.functional.interpolate(
                     dm[None, None], size=(h, w), mode="bilinear", align_corners=False
