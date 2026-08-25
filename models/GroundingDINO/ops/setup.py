@@ -8,6 +8,14 @@
 
 import os
 import glob
+import sys
+
+# Windows MSVC preprocessor and build environment configuration
+if sys.platform == "win32":
+    os.environ["DISTUTILS_USE_SDK"] = "1"
+    existing_nvcc_flags = os.environ.get("NVCC_PREPEND_FLAGS", "")
+    win_nvcc_flags = "-Xcompiler /Zc:preprocessor -DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING"
+    os.environ["NVCC_PREPEND_FLAGS"] = f"{existing_nvcc_flags} {win_nvcc_flags}".strip()
 
 import torch
 
@@ -24,16 +32,14 @@ def get_extensions():
     this_dir = os.path.dirname(os.path.abspath(__file__))
     extensions_dir = os.path.join(this_dir, "src")
 
-    main_file = glob.glob(os.path.join(extensions_dir, "*.cpp"))
-    source_cpu = glob.glob(os.path.join(extensions_dir, "cpu", "*.cpp"))
-    source_cuda = glob.glob(os.path.join(extensions_dir, "cuda", "*.cu"))
+    main_file = glob.glob("src/*.cpp")
+    source_cpu = glob.glob("src/cpu/*.cpp")
+    source_cuda = glob.glob("src/cuda/*.cu")
 
     sources = main_file + source_cpu
     extension = CppExtension
     extra_compile_args = {"cxx": []}
     define_macros = []
-
-
 
     if torch.cuda.is_available() and CUDA_HOME is not None:
         extension = CUDAExtension
@@ -48,7 +54,7 @@ def get_extensions():
     else:
         raise NotImplementedError('Cuda is not availabel')
 
-    sources = [os.path.join(extensions_dir, s) for s in sources]
+    # sources = [os.path.join(extensions_dir, s) for s in sources]
     include_dirs = [extensions_dir]
     ext_modules = [
         extension(
