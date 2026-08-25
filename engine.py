@@ -71,7 +71,9 @@ def print_bins_result(counts, prefix=""):
         counts,
         columns=["pred_cnt", "gt_cnt"],
     )
-    target_intervals = [(1, 5), (6, 10), (11, 20), (21, 40), (41,)]
+    frame.to_csv(f"{prefix}output.csv", index=False)
+    # target_intervals = [(1, 5), (6, 10), (11, 20), (21, 40), (41,), (21, 50), (51,)]
+    target_intervals =  [(1, 5), (6, 10), (11, 20), (21, 40),  (21, 50), (51,100), (41,), (51,), (101,)]
     headers = []
     values = []
 
@@ -265,12 +267,12 @@ def get_count_errs(
     count_output_state_dict=None,
 ):
     logits = outputs["pred_logits"].sigmoid()
-    densities = outputs["density_map"].cpu()
-
     boxes = outputs["pred_boxes"]
-    np.save("logits.npy", logits.cpu().numpy())
+    densities = outputs["density_map"].cpu()
     samples = samples.to_img_list()
     sizes = [target["size"] for target in targets]
+
+    # np.save("logits.npy", logits.cpu().numpy())
 
     abs_errs = []
     abs_errs_density = []
@@ -297,7 +299,6 @@ def get_count_errs(
 
         gt_count = targets[sample_ind]["labels"].shape[0]
         pred_cnt = sample_logits.shape[0]
-
         pred_cnt_den = densities[sample_ind].sum().item()
 
         if counts is not None:

@@ -356,7 +356,7 @@ class Transformer(nn.Module):
         # if os.environ.get("SHILONG_AMP_INFNAN_DEBUG") == '1':
         #     if memory.isnan().any() | memory.isinf().any():
         #         import ipdb; ipdb.set_trace()
-
+        
         if self.two_stage_type == "standard":  # 把encoder的输出作为proposal
             output_memory, output_proposals = gen_encoder_output_proposals(
                 memory, mask_flatten, spatial_shapes

@@ -368,7 +368,16 @@ def main(args):
 
     if args.eval:
         os.environ["EVAL_FLAG"] = "TRUE"
-        val_mae, test_stats, coco_evaluator = evaluate(
+        (
+            bins_result,
+            bins_result_den,
+            val_mae,
+            val_rmse,
+            val_mae_den,
+            val_rmse_den,
+            test_stats,
+            coco_evaluator,
+        )  = evaluate(
             model,
             criterion,
             postprocessors,
