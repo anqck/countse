@@ -74,7 +74,7 @@ def print_bins_result(counts, prefix = ""):
         counts,
         columns=["pred_cnt", "gt_cnt"],
     )
-    target_intervals = [(1, 5), (6, 10), (11, 20), (21, 40), (41,)]
+    target_intervals =  [(1, 5), (6, 10), (11, 20), (21, 40),  (21, 50), (51,100), (41,), (51,), (101,)]
     headers = []
     values = []
 
