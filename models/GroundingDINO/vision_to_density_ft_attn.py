@@ -266,4 +266,15 @@ class VisionDensityAttnBlock(nn.Module):
             d_norm,
             density_attn_mask=density_attn_mask,
         )
+
+        # print(
+        #     "visual_norm:", visual_ft.detach().norm().item(),
+        #     "delta_norm:", delta_v.detach().norm().item(),
+        #     "residual_norm:", (self.gamma * delta_v).detach().norm().item(),
+        #     "ratio:", (
+        #         (self.gamma * delta_v).detach().norm() /
+        #         (visual_ft.detach().norm() + 1e-6)
+        #     ).item()
+        # )
+        # assert 1 == 0
         return visual_ft + self.drop_path(self.gamma * delta_v)

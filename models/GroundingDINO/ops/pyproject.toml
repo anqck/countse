@@ -1,3 +1,9 @@
 [build-system]
-requires = ["setuptools", "wheel", "torch"]
+requires = ["setuptools<=81", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "MultiScaleDeformableAttention"
+version = "1.0.0"
+requires-python = ">=3.12"
+description = "PyTorch Wrapper for CUDA Functions of Multi-Scale Deformable Attention"
