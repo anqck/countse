@@ -74,7 +74,17 @@ def print_bins_result(counts, prefix=""):
     )
     frame.to_csv(f"{prefix}output.csv", index=False)
     # target_intervals = [(1, 5), (6, 10), (11, 20), (21, 40), (41,), (21, 50), (51,)]
-    target_intervals =  [(1, 5), (6, 10), (11, 20), (21, 40),  (21, 50), (51,100), (41,), (51,), (101,)]
+    target_intervals = [
+        (1, 5),
+        (6, 10),
+        (11, 20),
+        (21, 40),
+        (21, 50),
+        (51, 100),
+        (41,),
+        (51,),
+        (101,),
+    ]
     headers = []
     values = []
 
@@ -448,6 +458,7 @@ def evaluate(
                     .numpy()
                 )
                 dm = outputs["density_map"][j, 0, : h // 8, : w // 8].detach().cpu()
+                dm_pred_count = dm.sum().item()
                 dm = torch.nn.functional.interpolate(
                     dm[None, None], size=(h, w), mode="bilinear", align_corners=False
                 )[0, 0]
@@ -462,7 +473,7 @@ def evaluate(
                     gt_points=gt_points,
                     pred_points=None,
                     gt_count=len(t["boxes"]),
-                    pred_count=dm.sum().item(),
+                    pred_count=dm_pred_count,
                 )
 
         abs_err, density_abs_err = get_count_errs(
