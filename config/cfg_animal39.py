@@ -4,9 +4,9 @@ data_aug_scales2_resize = [400, 500, 600]
 data_aug_scales2_crop = [384, 600]
 data_aug_scale_overlap = None
 batch_size = 4
-modelname = 'groundingdino'
+modelname = "groundingdino"
 backbone = "swin_B_384_22k"
-position_embedding = 'sine'
+position_embedding = "sine"
 pe_temperatureH = 20
 pe_temperatureW = 20
 return_interm_indices = [1, 2, 3]
@@ -23,10 +23,10 @@ num_patterns = 0
 num_feature_levels = 4
 enc_n_points = 4
 dec_n_points = 4
-two_stage_type = 'standard'
+two_stage_type = "standard"
 two_stage_bbox_embed_share = False
 two_stage_class_embed_share = False
-transformer_activation = 'relu'
+transformer_activation = "relu"
 dec_pred_bbox_embed_share = True
 dn_box_noise_scale = 1.0
 dn_label_noise_ratio = 0.5
@@ -45,16 +45,19 @@ text_dropout = 0.0
 fusion_dropout = 0.0
 fusion_droppath = 0.1
 sub_sentence_present = True
-max_labels = 90                               # pos + neg
-lr = 0.00001                                   # base learning rate
-backbone_freeze_keywords = None               # only for gdino backbone
-freeze_keywords = ['backbone.0', 'bert']      # for whole model, e.g. ['backbone.0', 'bert'] for freeze visual encoder and text encoder
-lr_backbone = 1e-05                           # specific learning rate
-lr_backbone_names = ['backbone.0', 'bert']
+max_labels = 90  # pos + neg
+lr = 0.00001  # base learning rate
+backbone_freeze_keywords = None  # only for gdino backbone
+freeze_keywords = [
+    "backbone.0",
+    "bert",
+]  # for whole model, e.g. ['backbone.0', 'bert'] for freeze visual encoder and text encoder
+lr_backbone = 1e-05  # specific learning rate
+lr_backbone_names = ["backbone.0", "bert"]
 lr_linear_proj_mult = 1e-05
-lr_linear_proj_names = ['ref_point_head', 'sampling_offsets']
+lr_linear_proj_names = ["ref_point_head", "sampling_offsets"]
 weight_decay = 0.0001
-param_dict_type = 'ddetr_in_mmdet'
+param_dict_type = "ddetr_in_mmdet"
 ddetr_lr_param = False
 epochs = 30
 lr_drop = 10
@@ -73,7 +76,7 @@ dabdetr_yolo_like_anchor_update = False
 dabdetr_deformable_encoder = False
 dabdetr_deformable_decoder = False
 use_deformable_box_attn = False
-box_attn_type = 'roi_align'
+box_attn_type = "roi_align"
 dec_layer_number = None
 decoder_layer_noise = False
 dln_xy_noise = 0.2
@@ -86,7 +89,7 @@ two_stage_learn_wh = False
 two_stage_default_hw = 0.05
 two_stage_keep_all_tokens = False
 num_select = 900
-batch_norm_type = 'FrozenBatchNorm2d'
+batch_norm_type = "FrozenBatchNorm2d"
 masks = False
 aux_loss = True
 set_cost_class = 5.0
@@ -102,9 +105,9 @@ mask_loss_coef = 1.0
 dice_loss_coef = 1.0
 focal_alpha = 0.25
 focal_gamma = 2.0
-decoder_sa_type = 'sa'
-matcher_type = 'HungarianMatcher'
-decoder_module_seq = ['sa', 'ca', 'ffn']
+decoder_sa_type = "sa"
+matcher_type = "HungarianMatcher"
+decoder_module_seq = ["sa", "ca", "ffn"]
 nms_iou_threshold = -1
 dec_pred_class_embed_share = True
 match_unstable_error = True
@@ -114,9 +117,50 @@ dn_scalar = 100
 box_threshold = 0.35
 text_threshold = 0
 use_coco_eval = False
-label_list = ["African Forest Elephant", "African Savanna Elephant", "American Beaver", "Asian Elephant", "Black Rat", "Black-Tailed Prairie Dog", "Bonobo", "Bornean Orangutan", "Brown Bear", "Brown Rat", "Chimpanzee", "Domestic Cat", "Domestic Dog", "Domestic Horse", "Eurasian Red Squirrel", "Gray Wolf", "Ground Squirrel", "House Mouse", "Indian Rhinoceros", "Leopard", "Lion", "Mountain Zebra", "Olive Baboon", "Plains Zebra", "Red Fox", "Rhesus Macaque", "Ring-Tailed Lemur", "Sea Otter", "Tiger", "Vervet Monkey", "Western Gorilla"]
-val_label_list = ["American Bison", "Common Eland", "Cow", "Domestic Water Buffalo", "Dromedary", "Red Deer", "Sheep", "Wildebeest"]
+label_list = [
+    "African Forest Elephant",
+    "African Savanna Elephant",
+    "American Beaver",
+    "Asian Elephant",
+    "Black Rat",
+    "Black-Tailed Prairie Dog",
+    "Bonobo",
+    "Bornean Orangutan",
+    "Brown Bear",
+    "Brown Rat",
+    "Chimpanzee",
+    "Domestic Cat",
+    "Domestic Dog",
+    "Domestic Horse",
+    "Eurasian Red Squirrel",
+    "Gray Wolf",
+    "Ground Squirrel",
+    "House Mouse",
+    "Indian Rhinoceros",
+    "Leopard",
+    "Lion",
+    "Mountain Zebra",
+    "Olive Baboon",
+    "Plains Zebra",
+    "Red Fox",
+    "Rhesus Macaque",
+    "Ring-Tailed Lemur",
+    "Sea Otter",
+    "Tiger",
+    "Vervet Monkey",
+    "Western Gorilla",
+]
+val_label_list = [
+    "American Bison",
+    "Common Eland",
+    "Cow",
+    "Domestic Water Buffalo",
+    "Dromedary",
+    "Red Deer",
+    "Sheep",
+    "Wildebeest",
+]
 
 # Density branch (Option B) configuration
-density_loss_coef = 0.5
-
+density_count_loss_coef = 0.5
+density_loss_coef = 1.0
