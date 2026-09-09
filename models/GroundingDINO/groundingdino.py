@@ -973,7 +973,7 @@ class SetCriterion(nn.Module):
 
         target_densities = torch.stack(gt_densities, dim=0).to(density.device)
 
-        diff = (density - target_densities).abs()
+        diff = (density - target_densities) ** 2
         num_valid_pixels = valid_mask.sum().clamp(min=1.0)
         loss_density = (diff[:, 0] * valid_mask).sum() / num_valid_pixels
         return {"loss_density": loss_density}
