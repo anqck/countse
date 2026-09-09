@@ -937,7 +937,7 @@ class SetCriterion(nn.Module):
 
     def loss_density(self, outputs, targets, indices, num_boxes):
         """
-        Padding-aware L1 between predicted and GT density map
+        Padding-aware MSE between predicted and GT density map
 
         Args:
             outputs (_type_): _description_
@@ -976,7 +976,7 @@ class SetCriterion(nn.Module):
         diff = (density - target_densities) ** 2
         num_valid_pixels = valid_mask.sum().clamp(min=1.0)
         loss_density = (diff[:, 0] * valid_mask).sum() / num_valid_pixels
-        return {"loss_density": loss_density}
+        return {"loss_density_l2": loss_density}
 
     def loss_density_count(self, outputs, targets, indices, num_boxes):
         """
@@ -1000,15 +1000,15 @@ class SetCriterion(nn.Module):
         )
 
         loss_density = F.l1_loss(pred_counts, gt_counts)
-        return {"loss_density_count": loss_density}
+        return {"loss_density": loss_density}
 
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
             "labels": self.token_sigmoid_binary_focal_loss,
             "cardinality": self.loss_cardinality,
             "boxes": self.loss_boxes,
-            "density": self.loss_density,
-            "density_count": self.loss_density_count,
+            "density": self.loss_density_count,
+            "density_l2": self.loss_density,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -1081,7 +1081,7 @@ class SetCriterion(nn.Module):
                 self.get_loss("density", outputs, targets, indices, num_boxes)
             )
             losses.update(
-                self.get_loss("density_count", outputs, targets, indices, num_boxes)
+                self.get_loss("density_l2", outputs, targets, indices, num_boxes)
             )
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
@@ -1419,7 +1419,7 @@ def build_groundingdino(args):
     # density loss weight (single term; added after aux/interm so it is not
     # expanded into aux/interm variants or the _coeff_weight_dict lookup).
     weight_dict["loss_density"] = getattr(args, "density_loss_coef", 0.0)
-    weight_dict["loss_density_count"] = getattr(args, "density_count_loss_coef", 0.0)
+    weight_dict["loss_density_l2"] = getattr(args, "density_l2_coeff", 0.0)
 
     # losses = ['labels', 'boxes', 'cardinality']
     losses = ["labels", "boxes"]
