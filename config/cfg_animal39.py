@@ -162,5 +162,5 @@ val_label_list = [
 ]
 
 # Density branch (Option B) configuration
-density_count_loss_coef = 0.0
-density_loss_coef = 1.0
+density_loss_coef = 0.0
+density_l2_coeff = 1.0
