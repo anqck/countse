@@ -75,15 +75,11 @@ def print_bins_result(counts, prefix=""):
     frame.to_csv(f"{prefix}output.csv", index=False)
     # target_intervals = [(1, 5), (6, 10), (11, 20), (21, 40), (41,), (21, 50), (51,)]
     target_intervals = [
-        (1, 5),
-        (6, 10),
-        (11, 20),
-        (21, 40),
-        (21, 50),
+        (1, 10),
+        (11, 50),
+        (51, ),
         (51, 100),
-        (41,),
-        (51,),
-        (101,),
+        (101, ),
     ]
     headers = []
     values = []
@@ -399,6 +395,7 @@ def evaluate(
 
     _cnt = 0
     output_state_dict = {}  # for debug only
+    count_output_state_dict = {}
 
     if args.use_coco_eval:
         from pycocotools.coco import COCO
@@ -470,13 +467,15 @@ def evaluate(
                 visualise_output_and_save(
                     img,
                     dm,
+                    figsize=None,
                     save_path=os.path.join(vis_dir, f"{t['image_id'].item()}.png"),
-                    gt_points=gt_points,
+                    gt_points=None,
                     pred_points=None,
                     gt_count=len(t["boxes"]),
                     pred_count=dm_pred_count,
                 )
 
+        
         abs_err, density_abs_err = get_count_errs(
             samples,
             exemplars,
@@ -488,6 +487,7 @@ def evaluate(
             input_captions,
             counts,
             counts_den,
+            count_output_state_dict
         )
 
         abs_errs += abs_err
@@ -588,6 +588,12 @@ def evaluate(
         savepath = osp.join(args.output_dir, "results-{}.pkl".format(utils.get_rank()))
         print("Saving res to {}".format(savepath))
         torch.save(output_state_dict, savepath)
+
+        count_savepath = osp.join(
+            args.output_dir, "count_results-{}.pkl".format(utils.get_rank())
+        )
+        print("Saving count res to {}".format(count_savepath))
+        torch.save(count_output_state_dict, count_savepath)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

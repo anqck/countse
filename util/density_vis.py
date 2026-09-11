@@ -89,6 +89,7 @@ def visualise_output_and_save(
     *,
     save_path="./output.png",
     figsize=(12, 12),
+    show_labels: bool = False,
     gt_points=None,
     pred_points=None,
     gt_count=None,
@@ -124,12 +125,23 @@ def visualise_output_and_save(
     gt_points = _to_numpy(gt_points)
     pred_points = _to_numpy(pred_points)
 
-    fig, ax = plt.subplots(figsize=figsize)
+    # Determine canvas dimensions (H, W)
+    if source_image is not None:
+        h, w = source_image.shape[:2]
+    else:
+        h, w = density_np.shape[-2], density_np.shape[-1]
+
+    if figsize is None:
+        base_size = 12.0
+        figsize = (base_size, base_size * (h / w))
+
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_axes([0, 0, 1, 1])
     ax.set_axis_off()
     ax.imshow(source_image)
 
     # Density overlay (alpha-blended heatmap)
-    ax.imshow(density_np, cmap=plt.cm.viridis, alpha=0.5)
+    ax.imshow(density_np, cmap=plt.cm.jet, alpha=0.7)
 
     # Predicted points
     if pred_points is not None:
@@ -157,9 +169,9 @@ def visualise_output_and_save(
 
     # Counts in the top-right corner
     stats_lines = []
-    if gt_count is not None:
+    if show_labels and gt_count is not None:
         stats_lines.append(f"GT: {gt_count}")
-    if pred_count is not None:
+    if show_labels and pred_count is not None:
         stats_lines.append(f"Pred: {pred_count:.2f}")
     if stats_lines:
         ax.text(
@@ -171,8 +183,8 @@ def visualise_output_and_save(
             va="top",
             fontsize=12,
             color="white",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="black", alpha=0.6),
+            bbox={"boxstyle": "round,pad=0.3", "facecolor": "black", "alpha": 0.6},
         )
 
-    fig.savefig(save_path, bbox_inches="tight")
+    fig.savefig(save_path, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
