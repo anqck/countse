@@ -69,6 +69,11 @@ def get_args_parser():
     parser.add_argument("--find_unused_params", action="store_true")
     parser.add_argument("--save_results", action="store_true")
     parser.add_argument("--save_log", action="store_true")
+    parser.add_argument(
+        "--visualise_density",
+        action="store_true",
+        help="visualise predicted density map on image (eval mode only)",
+    )
 
     # distributed training parameters
     parser.add_argument(
@@ -307,7 +312,9 @@ def main(args):
     base_ds = get_coco_api_from_dataset(dataset_val)
 
     if args.frozen_weights is not None:
-        checkpoint = torch.load(args.frozen_weights, map_location="cpu",  weights_only = False)
+        checkpoint = torch.load(
+            args.frozen_weights, map_location="cpu", weights_only=False
+        )
         model_without_ddp.detr.load_state_dict(
             clean_state_dict(checkpoint["model"]), strict=False
         )
@@ -321,7 +328,7 @@ def main(args):
                 args.resume, map_location="cpu", check_hash=True
             )
         else:
-            checkpoint = torch.load(args.resume, map_location="cpu",  weights_only = False)
+            checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         model_without_ddp.load_state_dict(
             clean_state_dict(checkpoint["model"]), strict=False
         )
@@ -337,7 +344,9 @@ def main(args):
             args.start_epoch = checkpoint["epoch"] + 1
 
     if (not args.resume) and args.pretrain_model_path:
-        checkpoint = torch.load(args.pretrain_model_path, map_location="cpu",  weights_only = False)["model"]
+        checkpoint = torch.load(
+            args.pretrain_model_path, map_location="cpu", weights_only=False
+        )["model"]
         from collections import OrderedDict
 
         _ignorekeywordlist = args.finetune_ignore if args.finetune_ignore else []
@@ -364,7 +373,16 @@ def main(args):
 
     if args.eval:
         os.environ["EVAL_FLAG"] = "TRUE"
-        val_mae, test_stats, coco_evaluator = evaluate(
+        (
+            bins_result,
+            bins_result_den,
+            val_mae,
+            val_rmse,
+            val_mae_den,
+            val_rmse_den,
+            test_stats,
+            coco_evaluator,
+        )  = evaluate(
             model,
             criterion,
             postprocessors,

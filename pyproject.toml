@@ -1,0 +1,87 @@
+[project]
+name = "CountSE-Dense"
+version = "0.1.0"
+description = "CountSE with density map. Temp name update soon"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "addict==2.4.0",
+    "colorlog==6.8.2",
+    "cython==3.0.9",
+    "einops==0.8.2",
+    "matplotlib>=3.11.1",
+    "numpy==1.26.4",
+    "opencv-python==4.9.0.80",
+    "pandas==2.3.3",
+    "psutil==7.2.2",
+    "pycocotools==2.0.7",
+    "pyyaml==6.0.1",
+    "scikit-learn==1.9.0",
+    "scipy==1.12.0",
+    "seaborn==0.13.2",
+    "submitit==1.5.1",
+    "supervision==0.6.0",
+    "termcolor==2.4.0",
+    "timm==0.9.16",
+    "transformers==4.39.1",
+    "yapf==0.40.1",
+    "MultiScaleDeformableAttention"
+]
+
+
+[dependency-groups]
+dev = [
+    "pip>=26.2",
+    "wheel==0.48.0",
+    "setuptools<=81",
+    "gdown==6.1.0",
+]
+cu128 = [
+    "torch==2.10.0+cu128",
+    "torchaudio==2.10.0+cu128",
+    "torchvision==0.25.0+cu128",
+]
+cu130 = [
+    "torch==2.10.0+cu130",
+    "torchaudio==2.10.0+cu130",
+    "torchvision==0.25.0+cu130",
+]
+ops = [
+    "MultiScaleDeformableAttention"
+]
+
+[tool.uv]
+environments = ["sys_platform == 'linux' or sys_platform == 'win32'"]
+conflicts = [
+    [
+        { group = "cu128" },
+        { group = "cu130" },
+    ],
+]
+default-groups = ["dev", "cu130"]
+no-build-isolation-package = ["MultiScaleDeformableAttention"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", group = "cu128" },
+    { index = "pytorch-cu130", group = "cu130" },
+]
+torchvision = [
+    { index = "pytorch-cu128", group = "cu128" },
+    { index = "pytorch-cu130", group = "cu130" },
+]
+torchaudio = [
+    { index = "pytorch-cu128", group = "cu128" },
+    { index = "pytorch-cu130", group = "cu130" },
+]
+MultiScaleDeformableAttention = { path = "models/GroundingDINO/ops", editable = true }

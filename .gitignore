@@ -1,7 +1,7 @@
 **/__pycache__/**
 .Results/**
 checkpoints/**
-checkpoint_best_regular.pth
+*checkpoint_best_regular*.pth
 logits.npy
 wandb/**
 *.pyd
@@ -9,3 +9,11 @@ wandb/**
 *.so
 *.lib
 *.dll
+*.part
+*.zip
+*.tar
+*.tar.gz
+*.tar.xz
+*.7z
+*.csv
+*.pth

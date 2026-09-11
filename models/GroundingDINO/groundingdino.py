@@ -15,57 +15,39 @@
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
 # ------------------------------------------------------------------------
 import copy
+from collections import Counter
 from tokenize import tokenize
 from typing import List
 
 import numpy as np
-from numpy import linalg as LA
-
 import torch
 import torch.nn.functional as F
+from numpy import linalg as LA
 from scipy.sparse import csgraph
 from sklearn.cluster import SpectralClustering
 from torch import nn
-from torch.nn.functional import embedding
 from torchvision.ops.boxes import nms
-from torchvision.ops import roi_align
-from transformers import (
-    AutoTokenizer,
-    BertModel,
-    BertTokenizer,
-    RobertaModel,
-    RobertaTokenizerFast,
-)
-from collections import Counter
 
 from groundingdino.util import box_ops, get_tokenlizer
 from groundingdino.util.misc import (
     NestedTensor,
-    accuracy,
     get_world_size,
-    interpolate,
     inverse_sigmoid,
     is_dist_avail_and_initialized,
     nested_tensor_from_tensor_list,
 )
-from groundingdino.util.utils import get_phrases_from_posmap
-from groundingdino.util.visualizer import COCOVisualizer
-from groundingdino.util.vl_utils import create_positive_map_from_span
 
 from ..registry import MODULE_BUILD_FUNCS
 from .backbone import build_backbone
 from .bertwarper import (
     BertModelWarper,
-    generate_masks_with_special_tokens,
     generate_masks_with_special_tokens_and_transfer_map,
 )
+from .matcher import build_matcher
+from .positional_encoding_loca import PositionalEncodingsFixed
 from .transformer import build_transformer
 from .transformer_loca import TransformerEncoder
-from .positional_encoding_loca import PositionalEncodingsFixed
-from .density_head import FeatureFusionNeck, DensityDecoder, generate_gt_density
-from .utils import MLP, ContrastiveEmbed, sigmoid_focal_loss
-
-from .matcher import build_matcher
+from .utils import MLP, ContrastiveEmbed
 
 
 class ExemplarSelector(nn.Module):
@@ -388,9 +370,9 @@ class GroundingDINO(nn.Module):
                 in_channels = hidden_dim
             self.input_proj = nn.ModuleList(input_proj_list)
         else:
-            assert (
-                two_stage_type == "no"
-            ), "two_stage_type should be no if num_feature_levels=1 !!!"
+            assert two_stage_type == "no", (
+                "two_stage_type should be no if num_feature_levels=1 !!!"
+            )
             self.input_proj = nn.ModuleList(
                 [
                     nn.Sequential(
@@ -432,10 +414,6 @@ class GroundingDINO(nn.Module):
         self.class_embed = nn.ModuleList(class_embed_layerlist)
         self.transformer.decoder.bbox_embed = self.bbox_embed
         self.transformer.decoder.class_embed = self.class_embed
-
-        # density branch (Option B): post-encoder memory -> stride-8 density map
-        self.density_neck = FeatureFusionNeck(hidden_dim, hidden_dim)
-        self.density_decoder = DensityDecoder()
 
         # two stage
         self.two_stage_type = two_stage_type
@@ -726,29 +704,23 @@ class GroundingDINO(nn.Module):
         )
 
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
-        hs, reference, hs_enc, ref_enc, init_box_proposal, memory, spatial_shapes = (
-            self.transformer(
-                srcs,
-                masks,
-                input_query_bbox,
-                poss,
-                input_query_label,
-                attn_mask,
-                text_dict,
-            )
+        (
+            hs,
+            reference,
+            hs_enc,
+            ref_enc,
+            init_box_proposal,
+            density_feats,
+            density_map,
+        ) = self.transformer(
+            srcs,
+            masks,
+            input_query_bbox,
+            poss,
+            input_query_label,
+            attn_mask,
+            text_dict,
         )
-
-        # density branch (Option B): consume post-encoder `memory`, fuse to a
-        # stride-8 map, produce a density map + density-aware features.
-        memory_t = memory.transpose(1, 2)  # [bs, 256, sum(hw)]
-        boundaries = [int(h) * int(w) for h, w in spatial_shapes]
-        mem_maps = torch.split(memory_t, boundaries, dim=2)
-        mem_maps = [
-            torch.unflatten(m, 2, (int(h), int(w)))
-            for m, (h, w) in zip(mem_maps, spatial_shapes)
-        ]
-        fused = self.density_neck(mem_maps)  # (bs, 256, H/8, W/8)
-        density_feats, density_map, _ = self.density_decoder(fused)
 
         # deformable-detr-like anchor update
         outputs_coord_list = []
@@ -1451,7 +1423,6 @@ def create_positive_map(
     positive_map = torch.zeros((len(tokens_positive), max_text_len), dtype=torch.float)
 
     for j, label in enumerate(tokens_positive):
-
         start_ind = caption.find(cat_list[label])
         end_ind = start_ind + len(cat_list[label]) - 1
         beg_pos = tokenized.char_to_token(start_ind)

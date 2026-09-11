@@ -3,29 +3,27 @@
 Train and eval functions used in main.py
 """
 
+import math
+import os
+import random
+import sys
 from pathlib import Path
+from typing import Iterable
 
 import cv2
-import numpy as np
-import math
-import random
-import seaborn as sns
-
-import os
-import sys
-from typing import Iterable
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
-
-from util.utils import to_device
+import numpy as np
+import pandas as pd
+import seaborn as sns
 import torch
+from matplotlib.patches import Rectangle
 
 import util.misc as utils
 from datasets.coco_eval import CocoEvaluator
 from datasets.cocogrounding_eval import CocoGroundingEvaluator
-
 from datasets.panoptic_eval import PanopticEvaluator
-import pandas as pd
+from util.utils import to_device, renorm
+from util.density_vis import visualise_output_and_save
 
 
 def make_interval_nested(df, intervals):
@@ -69,12 +67,13 @@ def make_interval_nested(df, intervals):
         yield label, df[mask]
 
 
-def print_bins_result(counts, prefix = ""):
+def print_bins_result(counts, prefix=""):
     frame = pd.DataFrame(
         counts,
         columns=["pred_cnt", "gt_cnt"],
     )
     target_intervals =  [(1, 5), (6, 10), (11, 20), (21, 40),  (21, 50), (51,100), (41,), (51,), (101,)]
+    frame.to_csv(f"{prefix}output.csv", index=False)
     headers = []
     values = []
 
@@ -159,7 +158,6 @@ def train_one_epoch(
     for samples, targets in metric_logger.log_every(
         data_loader, print_freq, header, logger=logger
     ):
-
         optimizer.zero_grad()
 
         samples = samples.to(device)
@@ -269,12 +267,12 @@ def get_count_errs(
     count_output_state_dict=None,
 ):
     logits = outputs["pred_logits"].sigmoid()
-    densities = outputs["density_map"].cpu()
-
     boxes = outputs["pred_boxes"]
-    np.save("logits.npy", logits.cpu().numpy())
+    densities = outputs["density_map"].cpu()
     samples = samples.to_img_list()
     sizes = [target["size"] for target in targets]
+
+    # np.save("logits.npy", logits.cpu().numpy())
 
     abs_errs = []
     abs_errs_density = []
@@ -301,7 +299,6 @@ def get_count_errs(
 
         gt_count = targets[sample_ind]["labels"].shape[0]
         pred_cnt = sample_logits.shape[0]
-
         pred_cnt_den = densities[sample_ind].sum().item()
 
         if counts is not None:
@@ -339,7 +336,7 @@ def get_count_errs(
         #     print("All query logits: " + str(logits[sample_ind]))
         #     print("First query logit: " + str(logits[sample_ind][0]))
         #     print("tokenized caption: " + str(tokenized_captions["input_ids"]))
-        print("Pred Count: " + str(pred_cnt) + ", GT Count: " + str(gt_count))
+        # print("Pred Count: " + str(pred_cnt) + ", GT Count: " + str(gt_count))
 
         abs_errs.append(np.abs(gt_count - pred_cnt))
         abs_errs_density.append(np.abs(gt_count - pred_cnt_den))
@@ -391,6 +388,7 @@ def evaluate(
 
     _cnt = 0
     output_state_dict = {}  # for debug only
+    count_output_state_dict = {}
 
     if args.use_coco_eval:
         from pycocotools.coco import COCO
@@ -429,6 +427,48 @@ def evaluate(
                 )
 
         tokenized_captions = outputs["token"]
+
+        if (
+            args.eval
+            and getattr(args, "visualise_density", False)
+            and "density_map" in outputs
+        ):
+            vis_dir = (
+                os.path.join(output_dir, "density_vis")
+                if output_dir
+                else os.path.join(os.getcwd(), "density_vis")
+            )
+            os.makedirs(vis_dir, exist_ok=True)
+            for j, t in enumerate(targets):
+                h, w = int(t["size"][0]), int(t["size"][1])
+                img = (
+                    renorm(samples.tensors[j, :, :h, :w].detach().cpu())
+                    .permute(1, 2, 0)
+                    .clamp(0, 1)
+                    .numpy()
+                )
+                # dm = outputs["density_map"][j, 0, : h // 8, : w // 8].detach().cpu()
+                dm = outputs["density_map"][j, 0]
+                dm_pred_count = dm.sum().item()
+                dm = torch.nn.functional.interpolate(
+                    dm[None, None], size=(h, w), mode="bilinear", align_corners=False
+                )[0, 0]
+                gt_points = (
+                    t["boxes"][:, :2].detach().cpu().numpy()
+                    * torch.tensor([w, h], dtype=torch.float32).numpy()
+                )
+                visualise_output_and_save(
+                    img,
+                    dm,
+                    figsize=None,
+                    save_path=os.path.join(vis_dir, f"{t['image_id'].item()}.png"),
+                    gt_points=None,
+                    pred_points=None,
+                    gt_count=len(t["boxes"]),
+                    pred_count=dm_pred_count,
+                )
+
+        
         abs_err, density_abs_err = get_count_errs(
             samples,
             exemplars,
@@ -440,6 +480,7 @@ def evaluate(
             input_captions,
             counts,
             counts_den,
+            count_output_state_dict
         )
 
         abs_errs += abs_err
@@ -540,6 +581,12 @@ def evaluate(
         savepath = osp.join(args.output_dir, "results-{}.pkl".format(utils.get_rank()))
         print("Saving res to {}".format(savepath))
         torch.save(output_state_dict, savepath)
+
+        count_savepath = osp.join(
+            args.output_dir, "count_results-{}.pkl".format(utils.get_rank())
+        )
+        print("Saving count res to {}".format(count_savepath))
+        torch.save(count_output_state_dict, count_savepath)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()

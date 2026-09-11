@@ -1,17 +1,37 @@
+"""
+Density map visualisation utilities
+"""
+
 import numpy as np
 from matplotlib import pyplot as plt
-def visualize_density_on_blank(
-    output, save_path="", figsize=(10, 10), dots=None, cmap="jet"
-):
 
+
+def visualise_density_on_blank(
+    density_map,
+    *,
+    save_path="./output.png",
+    figsize=(10, 10),
+    annotation_points=None,
+    cmap="jet",
+) -> None:
+    """
+    Visualise density map on blank canvas. Optionally plots GT points.
+
+    Args:
+        density_map (_type_): _description_
+        save_path (str, optional): _description_. Defaults to "./output.png".
+        figsize (tuple, optional): _description_. Defaults to (10, 10).
+        annotation_points (_type_, optional): _description_. Defaults to None.
+        cmap (str, optional): _description_. Defaults to "jet".
+    """
 
     # Convert PyTorch tensor or array to 2D NumPy array
-    if hasattr(output, "detach"):
-        output_np = output.detach().cpu().numpy()
-    elif hasattr(output, "numpy"):
-        output_np = output.numpy()
+    if hasattr(density_map, "detach"):
+        output_np = density_map.detach().cpu().numpy()
+    elif hasattr(density_map, "numpy"):
+        output_np = density_map.numpy()
     else:
-        output_np = np.asarray(output)
+        output_np = np.asarray(density_map)
 
     output_np = np.squeeze(output_np)
     pred_cnt = float(output_np.sum())
@@ -32,11 +52,11 @@ def visualize_density_on_blank(
     im = ax.imshow(output_np, cmap=cmap, alpha=0.9)
 
     # Plot ground-truth dots if provided
-    if dots is not None:
+    if annotation_points is not None:
         dots_np = (
-            dots.detach().cpu().numpy()
-            if hasattr(dots, "detach")
-            else np.asarray(dots)
+            annotation_points.detach().cpu().numpy()
+            if hasattr(annotation_points, "detach")
+            else np.asarray(annotation_points)
         )
         ax.scatter(
             dots_np[:, 0],
@@ -51,51 +71,120 @@ def visualize_density_on_blank(
     fig.savefig(target_path, bbox_inches="tight")
     plt.close(fig)
 
-def visualize_output_and_save(
-    input_, output, save_path="", figsize=(20, 12), dots=None
-):
-   
 
-    # get the total count
-    pred_cnt = output.sum().item()
-    img1 = input_
-    # output = format_for_plotting(output)
+def _to_numpy(points):
+    if points is None:
+        return None
+    if hasattr(points, "detach"):
+        points = points.detach().cpu()
+    points = np.asarray(points)
+    if points.ndim != 2 or points.shape[0] == 0:
+        return None
+    return points
+
+
+def visualise_output_and_save(
+    source_image,
+    density_map,
+    *,
+    save_path="./output.png",
+    figsize=(12, 12),
+    show_labels: bool = False,
+    gt_points=None,
+    pred_points=None,
+    gt_count=None,
+    pred_count=None,
+) -> None:
+    """
+    Visualise predicted density map overlaid on the source image in a single
+    pane. Optionally plots GT and predicted points, and prints counts in the
+    top-right corner.
+
+    Args:
+        source_image (_type_): HxWx3 image in [0, 1] (RGB).
+        density_map (_type_): HxW density map (or tensor convertible to it).
+        save_path (str, optional): _description_. Defaults to "./output.png".
+        figsize (tuple, optional): _description_. Defaults to (12, 12).
+        gt_points (_type_, optional): Nx2 pixel (x, y) points. Defaults to None.
+        pred_points (_type_, optional): Nx2 pixel (x, y) points. Defaults to None.
+        gt_count (_type_, optional): ground truth count. Defaults to None.
+        pred_count (_type_, optional): predicted count. Defaults to None.
+    """
+
+    if hasattr(density_map, "detach"):
+        density_np = density_map.detach().cpu().numpy()
+    elif hasattr(density_map, "numpy"):
+        density_np = density_map.numpy()
+    else:
+        density_np = np.asarray(density_map)
+    density_np = np.squeeze(density_np)
+
+    if pred_count is None:
+        pred_count = float(density_np.sum())
+
+    gt_points = _to_numpy(gt_points)
+    pred_points = _to_numpy(pred_points)
+
+    # Determine canvas dimensions (H, W)
+    if source_image is not None:
+        h, w = source_image.shape[:2]
+    else:
+        h, w = density_np.shape[-2], density_np.shape[-1]
+
+    if figsize is None:
+        base_size = 12.0
+        figsize = (base_size, base_size * (h / w))
 
     fig = plt.figure(figsize=figsize)
-
-    # display the input image
-    ax = fig.add_subplot(2, 2, 1)
+    ax = fig.add_axes([0, 0, 1, 1])
     ax.set_axis_off()
-    ax.imshow(img1)
-    if dots is not None:
-        ax.scatter(dots[:, 0], dots[:, 1], c="red", edgecolors="blue")
-        # ax.scatter(dots[:,0], dots[:,1], c='black', marker='+')
-        ax.set_title("Input image, gt count: {}".format(dots.shape[0]))
-    else:
-        ax.set_title("Input image")
+    ax.imshow(source_image)
 
-    ax = fig.add_subplot(2, 2, 2)
-    ax.set_axis_off()
-    ax.set_title("Overlaid result, predicted count: {:.2f}".format(pred_cnt))
+    # Density overlay (alpha-blended heatmap)
+    ax.imshow(density_np, cmap=plt.cm.jet, alpha=0.7)
 
-    img2 = (
-        0.2989 * img1[:, :, 0] + 0.5870 * img1[:, :, 1] + 0.1140 * img1[:, :, 2]
-    )
-    ax.imshow(img2, cmap="gray")
-    ax.imshow(output, cmap=plt.cm.viridis, alpha=0.5)
+    # Predicted points
+    if pred_points is not None:
+        ax.scatter(
+            pred_points[:, 0],
+            pred_points[:, 1],
+            c="red",
+            s=15,
+            edgecolors="white",
+            linewidth=0.5,
+            label="pred",
+        )
 
-    # # display the density map
-    ax = fig.add_subplot(2, 2, 3)
-    ax.set_axis_off()
-    ax.set_title("Density map, predicted count: {:.2f}".format(pred_cnt))
-    ax.imshow(output)
-    # plt.colorbar()
+    # Ground truth points
+    if gt_points is not None:
+        ax.scatter(
+            gt_points[:, 0],
+            gt_points[:, 1],
+            c="blue",
+            s=15,
+            edgecolors="white",
+            linewidth=0.5,
+            label="gt",
+        )
 
-    # ax = fig.add_subplot(2, 2, 4)
-    ax.set_axis_off()
-    ax.set_title("Density map, predicted count: {:.2f}".format(pred_cnt))
-    ret_fig = ax.imshow(output)
-    fig.colorbar(ret_fig, ax=ax)
-    fig.savefig("./output.png", bbox_inches="tight")
-    # fig.show()
-    plt.close()
+    # Counts in the top-right corner
+    stats_lines = []
+    if show_labels and gt_count is not None:
+        stats_lines.append(f"GT: {gt_count}")
+    if show_labels and pred_count is not None:
+        stats_lines.append(f"Pred: {pred_count:.2f}")
+    if stats_lines:
+        ax.text(
+            0.98,
+            0.98,
+            "\n".join(stats_lines),
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=12,
+            color="white",
+            bbox={"boxstyle": "round,pad=0.3", "facecolor": "black", "alpha": 0.6},
+        )
+
+    fig.savefig(save_path, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
