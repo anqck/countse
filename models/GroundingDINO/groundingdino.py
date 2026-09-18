@@ -36,6 +36,7 @@ from groundingdino.util.misc import (
     is_dist_avail_and_initialized,
     nested_tensor_from_tensor_list,
 )
+from models.GroundingDINO.density_head import generate_gt_density
 
 from ..registry import MODULE_BUILD_FUNCS
 from .backbone import build_backbone
