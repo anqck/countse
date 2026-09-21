@@ -299,7 +299,9 @@ def get_count_errs(
 
         gt_count = targets[sample_ind]["labels"].shape[0]
         pred_cnt = sample_logits.shape[0]
-        pred_cnt_den = densities[sample_ind].sum().item()
+        # pred_cnt_den = densities[sample_ind].sum().item()
+        h, w = int(sizes[sample_ind][0]), int(sizes[sample_ind][1])
+        pred_cnt_den = densities[sample_ind, 0, : h // 8, : w // 8].sum().item()
 
         if counts is not None:
             counts.append((pred_cnt, gt_count))
@@ -447,8 +449,8 @@ def evaluate(
                     .clamp(0, 1)
                     .numpy()
                 )
-                # dm = outputs["density_map"][j, 0, : h // 8, : w // 8].detach().cpu()
-                dm = outputs["density_map"][j, 0]
+                dm = outputs["density_map"][j, 0, : h // 8, : w // 8].detach().cpu()
+                # dm = outputs["density_map"][j, 0]
                 dm_pred_count = dm.sum().item()
                 dm = torch.nn.functional.interpolate(
                     dm[None, None], size=(h, w), mode="bilinear", align_corners=False
