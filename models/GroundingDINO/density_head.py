@@ -5,6 +5,7 @@
 # Consumes the post-encoder, text-conditioned `memory`, fused by
 # FeatureFusionNeck into a single stride-8 map.
 # ------------------------------------------------------------------------
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -151,7 +152,7 @@ class DensityDecoder(nn.Module):
 #     return density
 
 
-def generate_gt_density(
+def generate_gt_density_legacy(
     pts: torch.Tensor,
     shape,
     s_factor: float = 8.0,
@@ -294,3 +295,58 @@ def generate_gt_density(
         density = density / density_sum.clamp(min=1e-8)
 
     return density
+
+def generate_gt_density(
+    pts: torch.Tensor,
+    shape: tuple[int, int],
+    sf: float = 16.0,
+) -> torch.Tensor:
+    H, W = int(shape[0]), int(shape[1])
+    device = pts.device
+
+    if pts.numel() == 0:
+        return torch.zeros((H, W), dtype=torch.float32, device=device)
+
+    scale = torch.tensor([W, H], dtype=torch.float32, device=device)
+    pts_px = pts[:, :2] * scale
+    num_pts = pts_px.shape[0]
+
+    if num_pts == 1:
+        avg = (H + W) / 4.0
+    else:
+        dists = torch.cdist(pts_px, pts_px, p=2.0)
+        dists.fill_diagonal_(torch.inf)
+        knn_dists = dists.min(dim=-1).values
+        avg = knn_dists.mean().item()
+
+    s = max(avg / sf, 1.0)
+    radius = max(int(math.ceil(3.0 * s)), 1)
+
+    coords = torch.arange(-radius, radius + 1, dtype=torch.float32, device=device)
+    kernel_1d = torch.exp(-(coords.pow(2)) / (2.0 * (s**2)))
+    kernel_1d = kernel_1d / kernel_1d.sum().clamp(min=1e-8)
+
+    weight_x = kernel_1d.view(1, 1, 1, -1)
+    weight_y = kernel_1d.view(1, 1, -1, 1)
+
+    ones_w = torch.ones((1, 1, 1, W), dtype=torch.float32, device=device)
+    ones_h = torch.ones((1, 1, H, 1), dtype=torch.float32, device=device)
+    acc_x = F.conv2d(ones_w, weight_x, padding=(0, radius)).squeeze()  # [W]
+    acc_y = F.conv2d(ones_h, weight_y, padding=(radius, 0)).squeeze()  # [H]
+
+    x_coords = torch.round(pts_px[:, 0]).long().clamp(0, W - 1)
+    y_coords = torch.round(pts_px[:, 1]).long().clamp(0, H - 1)
+
+    point_weights = 1.0 / (acc_y[y_coords] * acc_x[x_coords]).clamp(min=1e-6)
+
+    grid = torch.zeros((1, 1, H, W), dtype=torch.float32, device=device)
+    grid[0, 0].index_put_(
+        (y_coords, x_coords),
+        point_weights,
+        accumulate=True,
+    )
+
+    out = F.conv2d(grid, weight_x, padding=(0, radius))
+    out = F.conv2d(out, weight_y, padding=(radius, 0))
+
+    return out.squeeze(0).squeeze(0)
