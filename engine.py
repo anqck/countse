@@ -408,9 +408,9 @@ def evaluate(
     counts_den = []
     abs_errs = []
     density_abs_errs = []
-    for samples, targets in metric_logger.log_every(
+    for id, (samples, targets) in enumerate(metric_logger.log_every(
         data_loader, 10, header, logger=logger
-    ):
+    )):
         samples = samples.to(device)
 
         targets = [{k: to_device(v, device) for k, v in t.items()} for t in targets]
@@ -459,6 +459,7 @@ def evaluate(
                     t["boxes"][:, :2].detach().cpu().numpy()
                     * torch.tensor([w, h], dtype=torch.float32).numpy()
                 )
+                # print(id + j, dm.sum(), dm.max())
                 visualise_output_and_save(
                     img,
                     dm,
@@ -469,6 +470,7 @@ def evaluate(
                     gt_count=len(t["boxes"]),
                     pred_count=dm_pred_count,
                 )
+                # assert 1 == 0
 
         
         abs_err, density_abs_err = get_count_errs(

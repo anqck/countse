@@ -948,7 +948,8 @@ class SetCriterion(nn.Module):
 
         diff = (density - target_densities) ** 2
         num_valid_pixels = valid_mask.sum().clamp(min=1.0)
-        loss_density = (diff[:, 0] * valid_mask).sum() / bs # / num_valid_pixels
+        # loss_density = (diff[:, 0] * valid_mask).sum() / bs # / num_valid_pixels
+        loss_density = (diff[:, 0] * valid_mask).sum()  / num_valid_pixels
         return {"loss_density_l2": loss_density}
 
     def loss_density_count(self, outputs, targets, indices, num_boxes):
