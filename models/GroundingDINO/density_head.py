@@ -299,13 +299,14 @@ def generate_gt_density_legacy(
 def generate_gt_density(
     pts: torch.Tensor,
     shape: tuple[int, int],
-    sf: float = 16.0,
+    s_factor: float = 16.0,
+    *_, **__
 ) -> torch.Tensor:
     H, W = int(shape[0]), int(shape[1])
     device = pts.device
 
     if pts.numel() == 0:
-        return torch.zeros((H, W), dtype=torch.float32, device=device)
+        return torch.zeros((0, H, W), dtype=torch.float32, device=device)
 
     scale = torch.tensor([W, H], dtype=torch.float32, device=device)
     pts_px = pts[:, :2] * scale
@@ -319,7 +320,7 @@ def generate_gt_density(
         knn_dists = dists.min(dim=-1).values
         avg = knn_dists.mean().item()
 
-    s = max(avg / sf, 1.0)
+    s = max(avg / s_factor, 1.0)
     radius = max(int(math.ceil(3.0 * s)), 1)
 
     coords = torch.arange(-radius, radius + 1, dtype=torch.float32, device=device)
@@ -339,14 +340,11 @@ def generate_gt_density(
 
     point_weights = 1.0 / (acc_y[y_coords] * acc_x[x_coords]).clamp(min=1e-6)
 
-    grid = torch.zeros((1, 1, H, W), dtype=torch.float32, device=device)
-    grid[0, 0].index_put_(
-        (y_coords, x_coords),
-        point_weights,
-        accumulate=True,
-    )
+    grid = torch.zeros((num_pts, 1, H, W), dtype=torch.float32, device=device)
+    pt_idx = torch.arange(num_pts, device=device)
+    grid[pt_idx, 0, y_coords, x_coords] = point_weights
 
     out = F.conv2d(grid, weight_x, padding=(0, radius))
     out = F.conv2d(out, weight_y, padding=(radius, 0))
 
-    return out.squeeze(0).squeeze(0)
+    return out.squeeze(1)
