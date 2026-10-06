@@ -49,7 +49,7 @@ def visualise_density_on_blank(
     ax.imshow(blank_canvas, cmap="gray", vmin=0, vmax=1)
 
     # Render density overlay
-    im = ax.imshow(output_np, cmap=cmap, alpha=0.9)
+    im = ax.imshow(output_np, cmap=cmap, alpha=0.9, vmin=0.0, vmax=max(0.01, output_np.max()))
 
     # Plot ground-truth dots if provided
     if annotation_points is not None:

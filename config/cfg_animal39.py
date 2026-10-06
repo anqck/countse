@@ -164,4 +164,5 @@ val_label_list = [
 visual_density_cross_attn_with_x2 = False
 visual_density_cross_attn_num_layers = 2
 # Density branch (Option B) configuration
-density_loss_coef = 1.0
+density_loss_coef = 0.0
+density_l2_coeff = 1.0

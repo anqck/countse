@@ -84,7 +84,6 @@ class ODVGDataset(VisionDataset):
             num_to_add = min(len(neg_labels), self.max_labels - len(pos_labels))
             if num_to_add > 0:
                 vg_labels.extend(random.sample(list(neg_labels), num_to_add))
-
             # shuffle
             for i in range(len(vg_labels) - 1, 0, -1):
                 j = random.randint(0, i)

@@ -5,6 +5,7 @@
 # Consumes the post-encoder, text-conditioned `memory`, fused by
 # FeatureFusionNeck into a single stride-8 map.
 # ------------------------------------------------------------------------
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,15 +23,27 @@ class FeatureFusionNeck(nn.Module):
         self.lateral0 = nn.Conv2d(in_channels, out_channels, 1)  # 1/8
         self.lateral1 = nn.Conv2d(in_channels, out_channels, 1)  # 1/16
         self.lateral2 = nn.Conv2d(in_channels, out_channels, 1)  # 1/32
-        # self.lateral3 = nn.Conv2d(in_channels, out_channels, 1)  # 1/64
-        self.smooth = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.lateral3 = nn.Conv2d(in_channels, out_channels, 1)  # 1/64
+        # self.smooth = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        self.smooth = nn.Sequential(
+            nn.Conv2d(out_channels, out_channels, 3, padding=1),
+            nn.GroupNorm(8, out_channels),
+            nn.GELU(),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1),
+        )
 
     def forward(self, features):
         f0, f1, f2, f3 = features
-        # p3 = self.lateral3(f3)
-        p2 = self.lateral2(f2)  #+ F.interpolate(p3, size=f2.shape[-2:], mode="nearest")
-        p1 = self.lateral1(f1) + F.interpolate(p2, size=f1.shape[-2:], mode="nearest")
-        p0 = self.lateral0(f0) + F.interpolate(p1, size=f0.shape[-2:], mode="nearest")
+        p3 = self.lateral3(f3)
+        p2 = self.lateral2(f2) + F.interpolate(
+            p3, size=f2.shape[-2:], mode="bilinear", align_corners=False
+        )
+        p1 = self.lateral1(f1) + F.interpolate(
+            p2, size=f1.shape[-2:], mode="bilinear", align_corners=False
+        )
+        p0 = self.lateral0(f0) + F.interpolate(
+            p1, size=f0.shape[-2:], mode="bilinear", align_corners=False
+        )
         return self.smooth(p0)  # (B, out_channels, H/8, W/8)
 
 
@@ -52,8 +65,10 @@ class DensityDecoder(nn.Module):
         super().__init__()
         self.reg_layer = nn.Sequential(
             nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.GroupNorm(8, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, hidden_dim2, kernel_size=3, padding=1),
+            nn.GroupNorm(8, hidden_dim2),
             nn.ReLU(inplace=True),
         )
         self.reg_layer2 = nn.Sequential(
@@ -64,9 +79,14 @@ class DensityDecoder(nn.Module):
         )
         self.density_layer = nn.Conv2d(hidden_dim2, 1, 1)
 
+        # Initialize final density layer to output near-zero values initially
+        nn.init.normal_(self.density_layer.weight, std=0.001)
+        nn.init.constant_(self.density_layer.bias, 0.0)
+
     def forward(self, x):
         x2 = self.reg_layer(x)
-        mu = F.relu(self.density_layer(x2))
+
+        mu = F.softplus(self.density_layer(x2))
         return [self.reg_layer2(x2), mu, x2]
 
 
@@ -136,7 +156,7 @@ class DensityDecoder(nn.Module):
 #     return density
 
 
-def generate_gt_density(
+def generate_gt_density_legacy(
     pts: torch.Tensor,
     shape,
     s_factor: float = 8.0,
@@ -279,3 +299,54 @@ def generate_gt_density(
         density = density / density_sum.clamp(min=1e-8)
 
     return density
+
+
+def generate_gt_density(
+    pts: torch.Tensor, shape: tuple[int, int], s_factor: float = 16.0, *_, **__
+) -> torch.Tensor:
+    H, W = int(shape[0]), int(shape[1])
+    device = pts.device
+
+    if pts.numel() == 0:
+        return torch.zeros((0, H, W), dtype=torch.float32, device=device)
+
+    scale = torch.tensor([W, H], dtype=torch.float32, device=device)
+    pts_px = pts[:, :2] * scale
+    num_pts = pts_px.shape[0]
+
+    if num_pts == 1:
+        avg = (H + W) / 4.0
+    else:
+        dists = torch.cdist(pts_px, pts_px, p=2.0)
+        dists.fill_diagonal_(torch.inf)
+        knn_dists = dists.min(dim=-1).values
+        avg = knn_dists.mean().item()
+
+    s = max(avg / s_factor, 1.0)
+    radius = max(int(math.ceil(3.0 * s)), 1)
+
+    coords = torch.arange(-radius, radius + 1, dtype=torch.float32, device=device)
+    kernel_1d = torch.exp(-(coords.pow(2)) / (2.0 * (s**2)))
+    kernel_1d = kernel_1d / kernel_1d.sum().clamp(min=1e-8)
+
+    weight_x = kernel_1d.view(1, 1, 1, -1)
+    weight_y = kernel_1d.view(1, 1, -1, 1)
+
+    ones_w = torch.ones((1, 1, 1, W), dtype=torch.float32, device=device)
+    ones_h = torch.ones((1, 1, H, 1), dtype=torch.float32, device=device)
+    acc_x = F.conv2d(ones_w, weight_x, padding=(0, radius)).squeeze()  # [W]
+    acc_y = F.conv2d(ones_h, weight_y, padding=(radius, 0)).squeeze()  # [H]
+
+    x_coords = torch.round(pts_px[:, 0]).long().clamp(0, W - 1)
+    y_coords = torch.round(pts_px[:, 1]).long().clamp(0, H - 1)
+
+    point_weights = 1.0 / (acc_y[y_coords] * acc_x[x_coords]).clamp(min=1e-6)
+
+    grid = torch.zeros((num_pts, 1, H, W), dtype=torch.float32, device=device)
+    pt_idx = torch.arange(num_pts, device=device)
+    grid[pt_idx, 0, y_coords, x_coords] = point_weights
+
+    out = F.conv2d(grid, weight_x, padding=(0, radius))
+    out = F.conv2d(out, weight_y, padding=(radius, 0))
+
+    return out.squeeze(1)

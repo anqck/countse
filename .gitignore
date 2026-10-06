@@ -5,9 +5,15 @@ checkpoints/**
 logits.npy
 wandb/**
 *.pyd
+*.pyc
+*.so
+*.lib
+*.dll
 *.part
 *.zip
 *.tar
 *.tar.gz
 *.tar.xz
 *.7z
+*.csv
+*.pth

@@ -36,6 +36,7 @@ from groundingdino.util.misc import (
     is_dist_avail_and_initialized,
     nested_tensor_from_tensor_list,
 )
+from models.GroundingDINO.density_head import generate_gt_density
 
 from ..registry import MODULE_BUILD_FUNCS
 from .backbone import build_backbone
@@ -908,49 +909,60 @@ class SetCriterion(nn.Module):
         return batch_idx, tgt_idx
 
     def loss_density(self, outputs, targets, indices, num_boxes):
-        """Density loss L_D: masked L1 between predicted and GT density maps.
+        """
+        Padding-aware MSE between predicted and GT density map
 
-        Padding-aware: `targets[j]['size']` is the post-transform, pre-padding
-        image size. GT density is generated per-point at stride-8 resolution
-        over the valid region, summed into a single channel, then padded to
-        the batch's padded size; loss is masked to the valid region only.
+        Args:
+            outputs (_type_): _description_
+            targets (_type_): _description_
+            indices (_type_): _description_
+            num_boxes (_type_): _description_
+        """
+        density = outputs["density_map"]  # (bs, 1, H/8, W/8)
+        bs, _, H_pad, W_pad = density.shape
+        gt_densities = []
+        valid_mask = torch.zeros(
+            (bs, H_pad, W_pad), dtype=torch.bool, device=density.device
+        )
+        for b, t in enumerate(targets):
+            pts = t["boxes"][:, :2]
+            H_tgt = min(int(t["size"][0]) // 8, H_pad)
+            W_tgt = min(int(t["size"][1]) // 8, W_pad)
+
+            valid_mask[b, :H_tgt, :W_tgt] = True
+
+            per_point = generate_gt_density(
+                pts=pts, shape=(H_tgt, W_tgt), s_factor=8.0, normalize=True
+            )
+
+            gt_density = per_point.sum(0, keepdim=True)  # [1, H_tgt, W_tgt]
+
+            pad_w = max(0, W_pad - W_tgt)
+            pad_h = max(0, H_pad - H_tgt)
+
+            if pad_w > 0 or pad_h > 0:
+                gt_density = F.pad(gt_density, (0, pad_w, 0, pad_h))
+            gt_densities.append(gt_density[:, :H_pad, :W_pad])
+
+        target_densities = torch.stack(gt_densities, dim=0).to(density.device)
+
+        diff = (density - target_densities) ** 2
+        num_valid_pixels = valid_mask.sum().clamp(min=1.0)
+        # loss_density = (diff[:, 0] * valid_mask).sum() / bs # / num_valid_pixels
+        loss_density = (diff[:, 0] * valid_mask).sum() / num_valid_pixels
+        return {"loss_density_l2": loss_density}
+
+    def loss_density_count(self, outputs, targets, indices, num_boxes):
+        """
+        Density loss L_D: L1 between predicted density sum and GT density sum.
         """
 
         density = outputs["density_map"]  # (bs, 1, H/8, W/8)
-        # bs, _, H_pad, W_pad = density.shape
-        # gt_densities = []
-        # valid_mask = torch.zeros((bs, H_pad, W_pad), dtype=torch.bool, device=density.device)
-        # for b, t in enumerate(targets):
-        #     pts = t['boxes'][:, :2]
-        #     H_tgt, W_tgt = int(t['size'][0]) // 8, int(t['size'][1]) // 8
-
-        # valid_mask[b, : H_tgt, :W_tgt] = True
-
-        # per_point = generate_gt_density(
-        #     pts=pts, shape=(H_tgt, W_tgt), s_factor=8.0, normalize=True
-        # )
-
-        # gt_density = per_point.sum(0, keepdim=True)  # [1, H_tgt, W_tgt]
-
-        # pad_w = max(0, W_pad - W_tgt)
-        # pad_h = max(0, H_pad - H_tgt)
-
-        # # print(gt_density.shape, gt_density.sum(), pts.shape,pad_w, pad_h)
-        # if pad_w > 0 or pad_h > 0:
-        #     gt_density = F.pad(gt_density, (0, pad_w, 0, pad_h))
-        # gt_densities.append(gt_density[:, :H_pad, :W_pad])
-
-        # target_densities = torch.stack(gt_densities, dim=0).to(density.device)
-
-        # diff = (density - target_densities).abs()
-        # num_valid_pixels = valid_mask.sum().clamp(min=1.0)
-        # loss_density = (diff[:, 0] * valid_mask).sum() / num_valid_pixels
-
         pred_counts = []
 
         for b, t in enumerate(targets):
-            H_tgt = int(t["size"][0]) // 8
-            W_tgt = int(t["size"][1]) // 8
+            H_tgt = min(int(t["size"][0]) // 8, density.shape[2])
+            W_tgt = min(int(t["size"][1]) // 8, density.shape[3])
 
             pred_counts.append(density[b, 0, :H_tgt, :W_tgt].sum())
 
@@ -961,8 +973,6 @@ class SetCriterion(nn.Module):
             device=density.device,
         )
 
-        # visualize_density_on_blank(density[0], "output.png")
-
         loss_density = F.l1_loss(pred_counts, gt_counts)
         return {"loss_density": loss_density}
 
@@ -971,7 +981,8 @@ class SetCriterion(nn.Module):
             "labels": self.token_sigmoid_binary_focal_loss,
             "cardinality": self.loss_cardinality,
             "boxes": self.loss_boxes,
-            "density": self.loss_density,
+            "density": self.loss_density_count,
+            "density_l2": self.loss_density,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -1012,7 +1023,7 @@ class SetCriterion(nn.Module):
             indices.extend(inds)
         # indices : A list of size batch_size, containing tuples of (index_i, index_j) where:
         # - index_i is the indices of the selected predictions (in order)
-        # - index_j is the indices of the corresponding selected targets (in order)
+        # - index_j is the indices of thek corresponding selected targets (in order)
 
         # import pdb; pdb.set_trace()
         tgt_ids = [v["labels"].cpu() for v in targets]
@@ -1038,10 +1049,13 @@ class SetCriterion(nn.Module):
         for loss in self.losses:
             losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
 
-        # density loss (single map, no aux/interm) — explicit, not in self.losses
+        # density losses (single map, no aux/interm) — explicit, not in self.losses
         if "density_map" in outputs:
             losses.update(
                 self.get_loss("density", outputs, targets, indices, num_boxes)
+            )
+            losses.update(
+                self.get_loss("density_l2", outputs, targets, indices, num_boxes)
             )
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
@@ -1379,6 +1393,7 @@ def build_groundingdino(args):
     # density loss weight (single term; added after aux/interm so it is not
     # expanded into aux/interm variants or the _coeff_weight_dict lookup).
     weight_dict["loss_density"] = getattr(args, "density_loss_coef", 0.0)
+    weight_dict["loss_density_l2"] = getattr(args, "density_l2_coeff", 0.0)
 
     # losses = ['labels', 'boxes', 'cardinality']
     losses = ["labels", "boxes"]

@@ -72,15 +72,19 @@ def print_bins_result(counts, prefix=""):
         counts,
         columns=["pred_cnt", "gt_cnt"],
     )
-    frame.to_csv(f"{prefix}output.csv", index=False)
-    # target_intervals = [(1, 5), (6, 10), (11, 20), (21, 40), (41,), (21, 50), (51,)]
+
     target_intervals = [
-        (1, 10),
-        (11, 50),
-        (51, ),
+        (1, 5),
+        (6, 10),
+        (11, 20),
+        (21, 40),
+        (21, 50),
         (51, 100),
-        (101, ),
+        (41,),
+        (51,),
+        (101,),
     ]
+    frame.to_csv(f"{prefix}output.csv", index=False)
     headers = []
     values = []
 
@@ -306,7 +310,9 @@ def get_count_errs(
 
         gt_count = targets[sample_ind]["labels"].shape[0]
         pred_cnt = sample_logits.shape[0]
-        pred_cnt_den = densities[sample_ind].sum().item()
+        # pred_cnt_den = densities[sample_ind].sum().item()
+        h, w = int(sizes[sample_ind][0]), int(sizes[sample_ind][1])
+        pred_cnt_den = densities[sample_ind, 0, : h // 8, : w // 8].sum().item()
 
         if counts is not None:
             counts.append((pred_cnt, gt_count))
@@ -413,8 +419,8 @@ def evaluate(
     counts_den = []
     abs_errs = []
     density_abs_errs = []
-    for samples, targets in metric_logger.log_every(
-        data_loader, 10, header, logger=logger
+    for id, (samples, targets) in enumerate(
+        metric_logger.log_every(data_loader, 10, header, logger=logger)
     ):
         samples = samples.to(device)
 
@@ -454,8 +460,9 @@ def evaluate(
                     .clamp(0, 1)
                     .numpy()
                 )
-                # dm = outputs["density_map"][j, 0, : h // 8, : w // 8].detach().cpu()
-                dm = outputs["density_map"][j, 0]
+
+                dm = outputs["density_map"][j, 0, : h // 8, : w // 8].detach().cpu()
+                # dm = outputs["density_map"][j, 0]
                 dm_pred_count = dm.sum().item()
                 dm = torch.nn.functional.interpolate(
                     dm[None, None], size=(h, w), mode="bilinear", align_corners=False
@@ -464,6 +471,8 @@ def evaluate(
                     t["boxes"][:, :2].detach().cpu().numpy()
                     * torch.tensor([w, h], dtype=torch.float32).numpy()
                 )
+
+                # print(id + j, dm.sum(), dm.max())
                 visualise_output_and_save(
                     img,
                     dm,
@@ -475,7 +484,8 @@ def evaluate(
                     pred_count=dm_pred_count,
                 )
 
-        
+                # assert 1 == 0
+
         abs_err, density_abs_err = get_count_errs(
             samples,
             exemplars,
@@ -487,7 +497,7 @@ def evaluate(
             input_captions,
             counts,
             counts_den,
-            count_output_state_dict
+            count_output_state_dict,
         )
 
         abs_errs += abs_err
