@@ -74,6 +74,8 @@ class Transformer(nn.Module):
         fusion_droppath=0.0,
         visual_density_cross_attn_with_x2: bool = False,
         visual_density_cross_attn_num_layers: int = 1,
+        visual_density_cross_attn_type: str = "deformable",
+        visual_density_cross_attn_n_points: int = 4,
     ):
         super().__init__()
 
@@ -205,10 +207,13 @@ class Transformer(nn.Module):
         self.visual_density_cross_attn_block = VisionDensityAttnBlock(
             visual_dim=d_model,
             density_dim=d_model // 2 if visual_density_cross_attn_with_x2 else d_model,
-            embed_dim=dim_feedforward // 2,
+            embed_dim=d_model,
             num_heads=nhead // 2,
             dropout=fusion_dropout,
             drop_path=fusion_droppath,
+            num_levels=1,
+            num_points=visual_density_cross_attn_n_points,
+            attn_type=visual_density_cross_attn_type,
         )
         self.visual_density_cross_attn_layers = _get_clones(
             self.visual_density_cross_attn_block,
@@ -337,18 +342,29 @@ class Transformer(nn.Module):
 
         # Vision-Density cross-attention
         # bs, (h/8) * (w/8)
+        reference_points = self.encoder.get_reference_points(
+            spatial_shapes, valid_ratios, device=src_flatten.device
+        )
+        density_reference_points = reference_points[:, :, 0:1, :]
+        density_spatial_shapes = spatial_shapes[0:1]
+        density_level_start_index = torch.as_tensor(
+            [0], dtype=torch.long, device=src_flatten.device
+        )
         stride8_density_mask = torch.split(mask_flatten, boundaries, dim=1)[0]
         density_feats = density_feats.flatten(2, 3).transpose(1, 2)
         x2 = x2.flatten(2, 3).transpose(1, 2)
 
-        # TODO: check
         for idx, layer in enumerate(self.visual_density_cross_attn_layers):
             memory = layer(
                 visual_ft=memory,
                 density_ft=(
                     x2 if self.visual_density_cross_attn_with_x2 else density_feats
                 ),
+                reference_points=density_reference_points,
+                spatial_shapes=density_spatial_shapes,
+                level_start_index=density_level_start_index,
                 density_attn_mask=stride8_density_mask,
+                query_pos=lvl_pos_embed_flatten,
             )
 
         text_dict["encoded_text"] = memory_text
@@ -1069,4 +1085,10 @@ def build_transformer(args):
         fusion_droppath=args.fusion_droppath,
         visual_density_cross_attn_with_x2=args.visual_density_cross_attn_with_x2,
         visual_density_cross_attn_num_layers=args.visual_density_cross_attn_num_layers,
+        visual_density_cross_attn_type=getattr(
+            args, "visual_density_cross_attn_type", "deformable"
+        ),
+        visual_density_cross_attn_n_points=getattr(
+            args, "visual_density_cross_attn_n_points", 4
+        ),
     )
