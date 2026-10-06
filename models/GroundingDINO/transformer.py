@@ -347,9 +347,10 @@ class Transformer(nn.Module):
         )
         density_reference_points = reference_points[:, :, 0:1, :]
         density_spatial_shapes = spatial_shapes[0:1]
-        density_level_start_index = torch.as_tensor(
-            [0], dtype=torch.long, device=src_flatten.device
-        )
+        density_level_start_index = spatial_shapes.new_zeros((1,))
+        # torch.as_tensor(
+        #     [0], dtype=torch.long, device=src_flatten.device
+        # )
         stride8_density_mask = torch.split(mask_flatten, boundaries, dim=1)[0]
         density_feats = density_feats.flatten(2, 3).transpose(1, 2)
         x2 = x2.flatten(2, 3).transpose(1, 2)
