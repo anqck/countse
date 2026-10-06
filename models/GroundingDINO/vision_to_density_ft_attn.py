@@ -1,7 +1,10 @@
+import math
 import torch
 from timm.models.layers import DropPath
 from torch import nn
 from torch.nn import functional as F
+
+from .ms_deform_attn import MultiScaleDeformableAttention
 
 
 class VisionDensityMultiHeadCrossAttn(nn.Module):
@@ -214,6 +217,124 @@ class VisionDensityMultiHeadCrossAttn(nn.Module):
     #     return attn_output
 
 
+class VisionDensityDeformableCrossAttn(nn.Module):
+    """Multi-Scale Deformable Cross-Attention for visual queries attending to density features."""
+
+    def __init__(
+        self,
+        visual_dim: int,
+        density_dim: int,
+        embed_dim: int,
+        num_heads: int,
+        num_levels: int = 1,
+        num_points: int = 4,
+        img2col_step: int = 64,
+        dropout: float = 0.1,
+        _cfg=None,
+    ):
+        super().__init__()
+        self.visual_dim = visual_dim
+        self.density_dim = density_dim
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.num_levels = num_levels
+        self.num_points = num_points
+
+        if visual_dim != embed_dim:
+            self.query_proj = nn.Linear(visual_dim, embed_dim)
+        else:
+            self.query_proj = nn.Identity()
+
+        self.deform_attn = MultiScaleDeformableAttention(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            num_levels=num_levels,
+            num_points=num_points,
+            img2col_step=img2col_step,
+            batch_first=True,
+            value_dim=density_dim,
+        )
+
+        if embed_dim != visual_dim:
+            self.out_proj = nn.Linear(embed_dim, visual_dim)
+        else:
+            self.out_proj = nn.Identity()
+
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+
+    def forward(
+        self,
+        visual_ft: torch.Tensor,
+        density_ft: torch.Tensor,
+        reference_points: torch.Tensor = None,
+        spatial_shapes: torch.Tensor = None,
+        level_start_index: torch.Tensor = None,
+        density_attn_mask: torch.Tensor = None,
+        query_pos: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            visual_ft: [bs, num_queries, visual_dim]
+            density_ft: [bs, num_values, density_dim]
+            reference_points: [bs, num_queries, num_levels, 2] in [0, 1]
+            spatial_shapes: [num_levels, 2]
+            level_start_index: [num_levels]
+            density_attn_mask: [bs, num_values] (True = padding/ignore)
+            query_pos: [bs, num_queries, visual_dim] (optional)
+        """
+        bsz, tgt_len, _ = visual_ft.size()
+        src_len = density_ft.size(1)
+
+        # Fallback for spatial shapes if not explicitly provided
+        if spatial_shapes is None:
+            side = int(math.isqrt(src_len))
+            if side * side == src_len:
+                spatial_shapes = torch.as_tensor(
+                    [[side, side]], dtype=torch.long, device=visual_ft.device
+                )
+            else:
+                spatial_shapes = torch.as_tensor(
+                    [[1, src_len]], dtype=torch.long, device=visual_ft.device
+                )
+
+        if level_start_index is None:
+            level_start_index = torch.cat(
+                (spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1])
+            )
+
+        # Fallback for reference points if not provided
+        if reference_points is None:
+            ref_side = int(math.isqrt(tgt_len))
+            if ref_side * ref_side == tgt_len:
+                ref_y, ref_x = torch.meshgrid(
+                    torch.linspace(0.5 / ref_side, 1.0 - 0.5 / ref_side, ref_side, device=visual_ft.device),
+                    torch.linspace(0.5 / ref_side, 1.0 - 0.5 / ref_side, ref_side, device=visual_ft.device),
+                    indexing="ij",
+                )
+                ref = torch.stack((ref_x.reshape(-1), ref_y.reshape(-1)), -1)
+            else:
+                ref_x = torch.linspace(0.5 / tgt_len, 1.0 - 0.5 / tgt_len, tgt_len, device=visual_ft.device)
+                ref_y = torch.full_like(ref_x, 0.5)
+                ref = torch.stack((ref_x, ref_y), -1)
+            reference_points = ref.unsqueeze(0).repeat(bsz, 1, 1).unsqueeze(2)  # [bsz, tgt_len, 1, 2]
+
+        if query_pos is not None:
+            visual_ft = visual_ft + query_pos
+
+        q = self.query_proj(visual_ft)
+
+        attn_output = self.deform_attn(
+            query=q,
+            value=density_ft,
+            query_pos=None,
+            key_padding_mask=density_attn_mask,
+            reference_points=reference_points,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+        )
+        return self.dropout(self.out_proj(attn_output))
+
+
 class VisionDensityAttnBlock(nn.Module):
     def __init__(
         self,
@@ -224,28 +345,51 @@ class VisionDensityAttnBlock(nn.Module):
         dropout: float = 0.1,
         drop_path: float = 0.0,
         init_values: float = 1e-4,
+        num_levels: int = 1,
+        num_points: int = 4,
+        attn_type: str = "deformable",
         _cfg=None,
     ):
         """
         Inputs:
-            embed_dim - Dimensionality of input and attention feature vectors
-            hidden_dim - Dimensionality of hidden layer in feed-forward network
-                         (usually 2-4x larger than embed_dim)
-            num_heads - Number of heads to use in the Multi-Head Attention block
-            dropout - Amount of dropout to apply in the feed-forward network
+            visual_dim - Dimensionality of visual input tokens
+            density_dim - Dimensionality of density feature tokens
+            embed_dim - Dimensionality of internal attention feature vectors
+            num_heads - Number of heads to use in Multi-Head Deformable Attention
+            dropout - Amount of dropout to apply
+            num_levels - Number of feature levels for density map (default 1: stride 8)
+            num_points - Number of sampling points per head per level (default 4)
+            attn_type - Attention mechanism: 'deformable' (MSDA) or 'full' (dense cross-attention)
         """
         super().__init__()
 
+        self.attn_type = attn_type
         # pre layer norm
         self.visual_layer_norm = nn.LayerNorm(visual_dim)
         self.density_layer_norm = nn.LayerNorm(density_dim)
-        self.attn = VisionDensityMultiHeadCrossAttn(
-            visual_dim=visual_dim,
-            density_dim=density_dim,
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-        )
+
+        if attn_type == "deformable":
+            self.attn = VisionDensityDeformableCrossAttn(
+                visual_dim=visual_dim,
+                density_dim=density_dim,
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                num_levels=num_levels,
+                num_points=num_points,
+                dropout=dropout,
+                _cfg=_cfg,
+            )
+        elif attn_type == "full":
+            self.attn = VisionDensityMultiHeadCrossAttn(
+                visual_dim=visual_dim,
+                density_dim=density_dim,
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                _cfg=_cfg,
+            )
+        else:
+            raise ValueError(f"Unknown attn_type '{attn_type}', expected 'deformable' or 'full'")
 
         # add layer scale for training stability
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -257,24 +401,28 @@ class VisionDensityAttnBlock(nn.Module):
         self,
         visual_ft: torch.Tensor,
         density_ft: torch.Tensor,
+        reference_points: torch.Tensor = None,
+        spatial_shapes: torch.Tensor = None,
+        level_start_index: torch.Tensor = None,
         density_attn_mask: torch.Tensor = None,
+        query_pos: torch.Tensor = None,
     ):
         v_norm = self.visual_layer_norm(visual_ft)
         d_norm = self.density_layer_norm(density_ft)
-        delta_v = self.attn(
-            v_norm,
-            d_norm,
-            density_attn_mask=density_attn_mask,
-        )
-
-        # print(
-        #     "visual_norm:", visual_ft.detach().norm().item(),
-        #     "delta_norm:", delta_v.detach().norm().item(),
-        #     "residual_norm:", (self.gamma * delta_v).detach().norm().item(),
-        #     "ratio:", (
-        #         (self.gamma * delta_v).detach().norm() /
-        #         (visual_ft.detach().norm() + 1e-6)
-        #     ).item()
-        # )
-        # assert 1 == 0
+        if self.attn_type == "deformable":
+            delta_v = self.attn(
+                visual_ft=v_norm,
+                density_ft=d_norm,
+                reference_points=reference_points,
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+                density_attn_mask=density_attn_mask,
+                query_pos=query_pos,
+            )
+        else:
+            delta_v = self.attn(
+                visual_ft=v_norm,
+                density_ft=d_norm,
+                density_attn_mask=density_attn_mask,
+            )
         return visual_ft + self.drop_path(self.gamma * delta_v)

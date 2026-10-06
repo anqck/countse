@@ -160,6 +160,7 @@ class MultiScaleDeformableAttention(nn.Module):
         num_points: int = 4,
         img2col_step: int = 64,
         batch_first: bool = False,
+        value_dim: Optional[int] = None,
     ):
         super().__init__()
         if embed_dim % num_heads != 0:
@@ -182,12 +183,13 @@ class MultiScaleDeformableAttention(nn.Module):
 
         self.im2col_step = img2col_step
         self.embed_dim = embed_dim
+        self.value_dim = embed_dim if value_dim is None else value_dim
         self.num_heads = num_heads
         self.num_levels = num_levels
         self.num_points = num_points
         self.sampling_offsets = nn.Linear(embed_dim, num_heads * num_levels * num_points * 2)
         self.attention_weights = nn.Linear(embed_dim, num_heads * num_levels * num_points)
-        self.value_proj = nn.Linear(embed_dim, embed_dim)
+        self.value_proj = nn.Linear(self.value_dim, embed_dim)
         self.output_proj = nn.Linear(embed_dim, embed_dim)
 
         self.init_weights()
