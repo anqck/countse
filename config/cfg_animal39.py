@@ -163,6 +163,7 @@ val_label_list = [
 
 visual_density_cross_attn_with_x2 = False
 visual_density_cross_attn_num_layers = 2
+# "deformable" or "full"
 visual_density_cross_attn_type = "deformable"
 visual_density_cross_attn_n_points = 4
 # Density branch (Option B) configuration
