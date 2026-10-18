@@ -169,3 +169,19 @@ visual_density_cross_attn_n_points = 4
 # Density branch (Option B) configuration
 density_loss_coef = 0.0
 density_l2_coeff = 1.0
+# dm-count losses
+# dm_loss := density_dm_loss_coef * (
+#   density_dm_loss_count_coef * dm_loss_count +
+#   density_dm_loss_tv_coef * dm_loss_tv +
+#   density_dm_loss_ot_coef * dm_loss_ot )
+density_dm_loss_coef = 0.0
+density_dm_loss_count_coef = 1.0
+density_dm_loss_ot_coef = 0.1
+density_dm_loss_tv_coef = 0.01
+# Sinkhorn entropy regularisation
+density_dm_loss_sinkhorn_reg = 10.0
+# Number of iterations in Sinkhorn
+density_dm_loss_sinkhorn_iter = 100
+# Normalize OT coordinates to [-1, 1] (matches DM-Count's --norm-cood flag).
+# 0 = use pixel coordinates (default, matches DM-Count default).
+density_dm_loss_norm_cood = 0

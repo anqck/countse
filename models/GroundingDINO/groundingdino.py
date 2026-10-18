@@ -37,6 +37,12 @@ from groundingdino.util.misc import (
     nested_tensor_from_tensor_list,
 )
 from models.GroundingDINO.density_head import generate_gt_density
+from models.GroundingDINO.dm_count_loss import (
+    OT_Loss_Variable,
+    gen_discrete_map,
+    gen_discrete_downsampled,
+    downsample_discrete,
+)
 
 from ..registry import MODULE_BUILD_FUNCS
 from .backbone import build_backbone
@@ -788,13 +794,32 @@ class GroundingDINO(nn.Module):
 
 
 class SetCriterion(nn.Module):
-    def __init__(self, matcher, weight_dict, focal_alpha, focal_gamma, losses):
+    def __init__(
+        self,
+        matcher,
+        weight_dict,
+        focal_alpha,
+        focal_gamma,
+        losses,
+        dm_ot_reg: float = 10.0,
+        dm_ot_iter: int = 100,
+        dm_stride: int = 8,
+        dm_norm_cood: bool = False,
+        dm_device=None,
+    ):
         """Create the criterion.
         Parameters:
             matcher: module able to compute a matching between targets and proposals
             weight_dict: dict containing as key the names of the losses and as values their relative weight.
             losses: list of all the losses to be applied. See get_loss for list of available losses.
             focal_alpha: alpha in Focal Loss
+
+        DM-Count loss parameters (only used when `loss_dm` weight > 0):
+            dm_ot_reg: Sinkhorn entropic regularization strength.
+            dm_ot_iter: Sinkhorn iterations.
+            dm_stride: density-map stride relative to the original image (8 for CountSE).
+            dm_norm_cood: if True, normalize coordinates to [-1, 1] in the OT cost matrix.
+            dm_device: device for the OT loss internals (defaults to CPU; moved on first call).
         """
         super().__init__()
         self.matcher = matcher
@@ -802,6 +827,17 @@ class SetCriterion(nn.Module):
         self.losses = losses
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
+
+        # DM-Count distribution-matching loss components.
+        self.dm_stride = dm_stride
+        self.ot_loss = OT_Loss_Variable(
+            stride=dm_stride,
+            norm_cood=dm_norm_cood,
+            device=dm_device,
+            num_of_iter_in_ot=dm_ot_iter,
+            reg=dm_ot_reg,
+        )
+        self.tv_loss = nn.L1Loss(reduction="none")
 
     @torch.no_grad()
     def loss_cardinality(self, outputs, targets, indices, num_boxes):
@@ -909,15 +945,20 @@ class SetCriterion(nn.Module):
         return batch_idx, tgt_idx
 
     def loss_density(self, outputs, targets, indices, num_boxes):
-        """
-        Padding-aware MSE between predicted and GT density map
+        """Padding-aware MSE between predicted and GT density map.
 
         Args:
             outputs (_type_): _description_
             targets (_type_): _description_
             indices (_type_): _description_
             num_boxes (_type_): _description_
+
         """
+        if self.weight_dict.get("loss_density_l2", 0.0) == 0:
+            return {
+                "loss_density_l2": torch.zeros((), device=outputs["density_map"].device)
+            }
+
         density = outputs["density_map"]  # (bs, 1, H/8, W/8)
         bs, _, H_pad, W_pad = density.shape
         gt_densities = []
@@ -953,9 +994,11 @@ class SetCriterion(nn.Module):
         return {"loss_density_l2": loss_density}
 
     def loss_density_count(self, outputs, targets, indices, num_boxes):
-        """
-        Density loss L_D: L1 between predicted density sum and GT density sum.
-        """
+        """Density loss L_D: L1 between predicted density sum and GT density sum."""
+        if self.weight_dict.get("loss_density", 0.0) == 0:
+            return {
+                "loss_density": torch.zeros((), device=outputs["density_map"].device)
+            }
 
         density = outputs["density_map"]  # (bs, 1, H/8, W/8)
         pred_counts = []
@@ -976,6 +1019,136 @@ class SetCriterion(nn.Module):
         loss_density = F.l1_loss(pred_counts, gt_counts)
         return {"loss_density": loss_density}
 
+    def loss_distribution_matching(self, outputs, targets, indices, num_boxes):
+        """Compute DM-Count distribution-matching loss.
+
+        Three components (per DM-Count, Wang et al. NeurIPS 2020):
+          - count: L1 between predicted density sum and GT count.
+          - OT: optimal-transport distance between the per-image normalized
+            predicted density and the uniform distribution over GT points,
+            computed via Sinkhorn and back-propagated through a surrogate
+            linear loss (gradient == OT gradient).
+          - TV: total-variation-style L1 between the normalized predicted
+            density and the normalized discrete GT density map.
+
+        Adaptations for CountSE (vs. the DM-Count reference):
+          - The density map is padded to the batch max; we slice the valid
+            region per image using `t["size"]` (consistent with
+            `loss_density` / `loss_density_count`).
+          - The OT coordinate grid is built per image from `(H_i, W_i)` to
+            support variable rectangular maps (see `OT_Loss_Variable`).
+          - GT points come from normalized cxcywh `boxes[:, :2]`; we convert
+            to original-image pixels via `pts_px = boxes[:, :2] * [W_i, H_i]`.
+          - The discrete GT map for the TV term is built at the original
+            image resolution then block-sum downsampled by `dm_stride`.
+
+        Args:
+            outputs (dict): must contain `density_map` of shape
+                `[bs, 1, H_pad/8, W_pad/8]` (softplus, non-negative).
+            targets (list[dict]): each dict must contain `boxes` (normalized
+                cxcywh) and `size` (tensor `[H_i, W_i]` in pixels).
+            indices: unused (kept for signature compatibility with
+                `get_loss`).
+            num_boxes: unused.
+
+        Returns:
+            dict with a single key `"loss_dm"`: the weighted sum of the three
+            components. Component weights (`loss_dm.count`, `loss_dm.ot`,
+            `loss_dm.tv`) are read from `self.weight_dict` and applied here;
+            the outer `loss_dm` weight is applied by the training engine.
+        """
+        density = outputs["density_map"]  # (bs, 1, H_pad/8, W_pad/8)
+        device = density.device
+        bs = density.size(0)
+        stride = self.dm_stride
+
+        if self.weight_dict.get("loss_dm", 0.0) == 0:
+            return {"loss_dm": torch.zeros((), device=device)}
+
+        weight_count = self.weight_dict.get("loss_dm.count", 0.0)
+        weight_ot = self.weight_dict.get("loss_dm.ot", 0.0)
+        weight_tv = self.weight_dict.get("loss_dm.tv", 0.0)
+
+        # Keep the OT loss internals on the same device as the density map.
+        self.ot_loss.device = device
+
+        loss_count = torch.zeros((), device=device)
+        loss_ot = torch.zeros((), device=device)
+        loss_tv = torch.zeros((), device=device)
+
+        for b, t in enumerate(targets):
+            # Original-image size for this sample (post-transform, pre-pad).
+            H_i = int(t["size"][0])
+            W_i = int(t["size"][1])
+            # Density-map spatial size for this sample (clamped to the
+            # padded tensor size in case of rounding/edge effects).
+            h_i = min(H_i // stride, density.size(2))
+            w_i = min(W_i // stride, density.size(3))
+
+            # Slice the valid (un-padded) region of the predicted density.
+            density_i = density[b, 0, :h_i, :w_i]  # [h_i, w_i]
+
+            gt_count_i = float(len(t["boxes"]))
+            pred_count_i = density_i.sum()
+
+            # --- Count loss: L1 between predicted count and GT count. ---
+            loss_count = loss_count + F.l1_loss(
+                pred_count_i,
+                torch.tensor(gt_count_i, device=device, dtype=density_i.dtype),
+                reduction="mean",
+            )
+
+            if gt_count_i == 0:
+                # OT is undefined for an empty target measure; skip OT and TV
+                # for this sample (consistent with DM-Count's `OT_Loss` which
+                # skips `if len(im_points) > 0`). The count loss above still
+                # penalizes any spurious predicted mass.
+                continue
+
+            # --- Per-image normalized predicted density (sums to 1). ---
+            density_normed_i = density_i / (pred_count_i + 1e-6)
+
+            # --- GT points in original-image pixel coords. ---
+            # `t["boxes"]` are normalized cxcywh; centers are `[:, :2]`.
+            pts_px = t["boxes"][:, :2] * torch.tensor(
+                [W_i, H_i], dtype=torch.float32, device=device
+            )  # [N, 2] in (x, y) pixel coords (always float32)
+
+            # --- OT loss (surrogate). ---
+            # OT_Loss_Variable expects batched inputs [1, 1, h, w].
+            ot_loss_i, _, _ = self.ot_loss(
+                density_normed_i.unsqueeze(0).unsqueeze(0),
+                density_i.unsqueeze(0).unsqueeze(0),
+                [pts_px],
+                H_i,
+                W_i,
+            )
+            loss_ot = loss_ot + ot_loss_i.squeeze()
+
+            # --- TV loss. ---
+            # Generate the discrete GT map directly at the density-map stride
+            # resolution to avoid huge full-resolution allocations and support
+            # arbitrary, non-divisible image dimensions.
+            gt_discrete_down = gen_discrete_downsampled(
+                h_i, w_i, H_i, W_i, pts_px, stride=stride
+            )  # [h_i, w_i]
+            gt_discrete_normed = gt_discrete_down / (gt_count_i + 1e-6)
+            # DM-Count weights the TV term per-image by the GT count.
+            tv_i = self.tv_loss(density_normed_i.float(), gt_discrete_normed).sum() * gt_count_i
+            loss_tv = loss_tv + tv_i
+
+        # Average over the batch (matches DM-Count's per-image then mean
+        # convention; the engine applies the outer `loss_dm` weight).
+        loss_count = loss_count / bs
+        loss_ot = loss_ot / bs
+        loss_tv = loss_tv / bs
+
+        return {
+            "loss_dm": weight_count * loss_count
+            + weight_ot * loss_ot
+            + weight_tv * loss_tv,
+        }
+
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
             "labels": self.token_sigmoid_binary_focal_loss,
@@ -983,18 +1156,22 @@ class SetCriterion(nn.Module):
             "boxes": self.loss_boxes,
             "density": self.loss_density_count,
             "density_l2": self.loss_density,
+            "dm": self.loss_distribution_matching,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
     def forward(self, outputs, targets, cat_list, caption, return_indices=False):
-        """This performs the loss computation.
-        Parameters:
-             outputs: dict of tensors, see the output specification of the model for the format
+        """Compute losses.
+
+        Args:
+             outputs: dict of tensors, see the output specification of the
+                      model for the format
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
 
              return_indices: used for vis. if True, the layer0-5 indices will be returned as well.
+
         """
         device = next(iter(outputs.values())).device
         one_hot = torch.zeros(
@@ -1057,6 +1234,7 @@ class SetCriterion(nn.Module):
             losses.update(
                 self.get_loss("density_l2", outputs, targets, indices, num_boxes)
             )
+            losses.update(self.get_loss("dm", outputs, targets, indices, num_boxes))
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if "aux_outputs" in outputs:
@@ -1158,93 +1336,6 @@ class PostProcess(nn.Module):
         label_list = torch.arange(len(cat_list))
         pos_map = create_positive_map(tokenized, label_list, cat_list, caption)
         # build a mapping from label_id to pos_map
-        if args.use_coco_eval:
-            id_map = {
-                0: 1,
-                1: 2,
-                2: 3,
-                3: 4,
-                4: 5,
-                5: 6,
-                6: 7,
-                7: 8,
-                8: 9,
-                9: 10,
-                10: 11,
-                11: 13,
-                12: 14,
-                13: 15,
-                14: 16,
-                15: 17,
-                16: 18,
-                17: 19,
-                18: 20,
-                19: 21,
-                20: 22,
-                21: 23,
-                22: 24,
-                23: 25,
-                24: 27,
-                25: 28,
-                26: 31,
-                27: 32,
-                28: 33,
-                29: 34,
-                30: 35,
-                31: 36,
-                32: 37,
-                33: 38,
-                34: 39,
-                35: 40,
-                36: 41,
-                37: 42,
-                38: 43,
-                39: 44,
-                40: 46,
-                41: 47,
-                42: 48,
-                43: 49,
-                44: 50,
-                45: 51,
-                46: 52,
-                47: 53,
-                48: 54,
-                49: 55,
-                50: 56,
-                51: 57,
-                52: 58,
-                53: 59,
-                54: 60,
-                55: 61,
-                56: 62,
-                57: 63,
-                58: 64,
-                59: 65,
-                60: 67,
-                61: 70,
-                62: 72,
-                63: 73,
-                64: 74,
-                65: 75,
-                66: 76,
-                67: 77,
-                68: 78,
-                69: 79,
-                70: 80,
-                71: 81,
-                72: 82,
-                73: 84,
-                74: 85,
-                75: 86,
-                76: 87,
-                77: 88,
-                78: 89,
-                79: 90,
-            }
-            new_pos_map = torch.zeros((91, 256))
-            for k, v in id_map.items():
-                new_pos_map[v] = pos_map[k]
-            pos_map = new_pos_map
 
         self.nms_iou_threshold = nms_iou_threshold
         self.positive_map = pos_map
@@ -1394,6 +1485,10 @@ def build_groundingdino(args):
     # expanded into aux/interm variants or the _coeff_weight_dict lookup).
     weight_dict["loss_density"] = getattr(args, "density_loss_coef", 0.0)
     weight_dict["loss_density_l2"] = getattr(args, "density_l2_coeff", 0.0)
+    weight_dict["loss_dm"] = getattr(args, "density_dm_loss_coef", 0.0)
+    weight_dict["loss_dm.count"] = getattr(args, "density_dm_loss_count_coef", 0.0)
+    weight_dict["loss_dm.ot"] = getattr(args, "density_dm_loss_ot_coef", 0.0)
+    weight_dict["loss_dm.tv"] = getattr(args, "density_dm_loss_tv_coef", 0.0)
 
     # losses = ['labels', 'boxes', 'cardinality']
     losses = ["labels", "boxes"]
@@ -1404,6 +1499,11 @@ def build_groundingdino(args):
         focal_alpha=args.focal_alpha,
         focal_gamma=args.focal_gamma,
         losses=losses,
+        dm_ot_reg=getattr(args, "density_dm_loss_sinkhorn_reg", 10.0),
+        dm_ot_iter=getattr(args, "density_dm_loss_sinkhorn_iter", 100),
+        dm_stride=8,
+        dm_norm_cood=getattr(args, "density_dm_loss_norm_cood", False),
+        dm_device=device,
     )
     criterion.to(device)
     postprocessors = {
