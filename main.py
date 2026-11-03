@@ -382,7 +382,7 @@ def main(args):
             val_rmse_den,
             test_stats,
             coco_evaluator,
-        )  = evaluate(
+        ) = evaluate(
             model,
             criterion,
             postprocessors,

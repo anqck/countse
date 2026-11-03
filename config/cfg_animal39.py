@@ -185,3 +185,25 @@ density_dm_loss_sinkhorn_iter = 100
 # Normalize OT coordinates to [-1, 1] (matches DM-Count's --norm-cood flag).
 # 0 = use pixel coordinates (default, matches DM-Count default).
 density_dm_loss_norm_cood = 0
+
+# Generalized Loss for counting and localization (Wan et al., CVPR 2021)
+# Master coefficient (0.0 = disabled by default, active when overridden via --options)
+density_gl_loss_coef = 0.0
+# Regularization weight for point and pixel losses (tau in paper)
+density_gl_tau = 0.1
+# Entropy temperature (epsilon = blur^p)
+density_gl_blur = 0.01
+# Marginal relaxation scale (rho = reach^p)
+density_gl_reach = 0.5
+# Epsilon-scaling geometric contraction factor
+density_gl_scaling = 0.5
+# Ground metric exponent (p=1.0)
+density_gl_p = 1.0
+# Ground cost metric: 'per' (perspective-guided), 'exp' (exponential), 'euclidean'
+density_gl_cost = "per"
+# Marginal point divergence: 'l1' or 'l2'
+density_gl_d_point = "l1"
+# Marginal pixel divergence: 'l1' or 'l2'
+density_gl_d_pixel = "l2"
+# Coordinate normalization mode: 'unit' ([0, 1] grid) or 'vendor' (scaled by crop_size)
+density_gl_norm_mode = "unit"

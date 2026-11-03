@@ -43,6 +43,7 @@ from models.GroundingDINO.dm_count_loss import (
     gen_discrete_downsampled,
     downsample_discrete,
 )
+from models.GroundingDINO.generalized_loss import GeneralizedLoss
 
 from ..registry import MODULE_BUILD_FUNCS
 from .backbone import build_backbone
@@ -806,6 +807,15 @@ class SetCriterion(nn.Module):
         dm_stride: int = 8,
         dm_norm_cood: bool = False,
         dm_device=None,
+        gl_tau: float = 0.1,
+        gl_blur: float = 0.01,
+        gl_reach: float = 0.5,
+        gl_scaling: float = 0.5,
+        gl_p: float = 1.0,
+        gl_cost: str = "per",
+        gl_d_point: str = "l1",
+        gl_d_pixel: str = "l2",
+        gl_norm_mode: str = "unit",
     ):
         """Create the criterion.
         Parameters:
@@ -820,6 +830,17 @@ class SetCriterion(nn.Module):
             dm_stride: density-map stride relative to the original image (8 for CountSE).
             dm_norm_cood: if True, normalize coordinates to [-1, 1] in the OT cost matrix.
             dm_device: device for the OT loss internals (defaults to CPU; moved on first call).
+
+        Generalized Loss parameters (only used when `loss_generalized` weight > 0):
+            gl_tau: Regularization weight for point and pixel losses.
+            gl_blur: Entropy temperature (epsilon = blur^p).
+            gl_reach: Marginal relaxation scale (rho = reach^p).
+            gl_scaling: Multi-scale geometric contraction factor.
+            gl_p: Ground metric exponent.
+            gl_cost: Ground cost metric ('per', 'exp', or 'euclidean').
+            gl_d_point: Dot marginal divergence ('l1' or 'l2').
+            gl_d_pixel: Pixel marginal divergence ('l1' or 'l2').
+            gl_norm_mode: Coordinate normalization mode ('unit' or 'vendor').
         """
         super().__init__()
         self.matcher = matcher
@@ -838,6 +859,20 @@ class SetCriterion(nn.Module):
             reg=dm_ot_reg,
         )
         self.tv_loss = nn.L1Loss(reduction="none")
+
+        # Generalized Loss (Wan et al., CVPR 2021)
+        self.generalized_loss = GeneralizedLoss(
+            stride=dm_stride,
+            tau=gl_tau,
+            blur=gl_blur,
+            reach=gl_reach,
+            scaling=gl_scaling,
+            p=gl_p,
+            cost_type=gl_cost,
+            d_point=gl_d_point,
+            d_pixel=gl_d_pixel,
+            norm_mode=gl_norm_mode,
+        )
 
     @torch.no_grad()
     def loss_cardinality(self, outputs, targets, indices, num_boxes):
@@ -1149,6 +1184,21 @@ class SetCriterion(nn.Module):
             + weight_tv * loss_tv,
         }
 
+    def loss_generalized(self, outputs, targets, indices, num_boxes):
+        """Generalized Loss for Counting and Localization (Wan et al., CVPR 2021)."""
+        if self.weight_dict.get("loss_generalized", 0.0) == 0:
+            return {
+                "loss_generalized": torch.zeros((), device=outputs["density_map"].device)
+            }
+        gl_res = self.generalized_loss(outputs["density_map"], targets)
+        return {
+            "loss_generalized": gl_res["loss"],
+            "loss_gl_emd": gl_res["emd_loss"],
+            "loss_gl_point": gl_res["point_loss"],
+            "loss_gl_pixel": gl_res["pixel_loss"],
+            "loss_gl_ent": gl_res["entropy"],
+        }
+
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
             "labels": self.token_sigmoid_binary_focal_loss,
@@ -1157,6 +1207,7 @@ class SetCriterion(nn.Module):
             "density": self.loss_density_count,
             "density_l2": self.loss_density,
             "dm": self.loss_distribution_matching,
+            "generalized": self.loss_generalized,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -1235,6 +1286,9 @@ class SetCriterion(nn.Module):
                 self.get_loss("density_l2", outputs, targets, indices, num_boxes)
             )
             losses.update(self.get_loss("dm", outputs, targets, indices, num_boxes))
+            losses.update(
+                self.get_loss("generalized", outputs, targets, indices, num_boxes)
+            )
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if "aux_outputs" in outputs:
@@ -1489,6 +1543,7 @@ def build_groundingdino(args):
     weight_dict["loss_dm.count"] = getattr(args, "density_dm_loss_count_coef", 0.0)
     weight_dict["loss_dm.ot"] = getattr(args, "density_dm_loss_ot_coef", 0.0)
     weight_dict["loss_dm.tv"] = getattr(args, "density_dm_loss_tv_coef", 0.0)
+    weight_dict["loss_generalized"] = getattr(args, "density_gl_loss_coef", 0.0)
 
     # losses = ['labels', 'boxes', 'cardinality']
     losses = ["labels", "boxes"]
@@ -1504,6 +1559,15 @@ def build_groundingdino(args):
         dm_stride=8,
         dm_norm_cood=getattr(args, "density_dm_loss_norm_cood", False),
         dm_device=device,
+        gl_tau=getattr(args, "density_gl_tau", 0.1),
+        gl_blur=getattr(args, "density_gl_blur", 0.01),
+        gl_reach=getattr(args, "density_gl_reach", 0.5),
+        gl_scaling=getattr(args, "density_gl_scaling", 0.5),
+        gl_p=getattr(args, "density_gl_p", 1.0),
+        gl_cost=getattr(args, "density_gl_cost", "per"),
+        gl_d_point=getattr(args, "density_gl_d_point", "l1"),
+        gl_d_pixel=getattr(args, "density_gl_d_pixel", "l2"),
+        gl_norm_mode=getattr(args, "density_gl_norm_mode", "unit"),
     )
     criterion.to(device)
     postprocessors = {
