@@ -76,6 +76,12 @@ class Transformer(nn.Module):
         visual_density_cross_attn_num_layers: int = 1,
         visual_density_cross_attn_type: str = "deformable",
         visual_density_cross_attn_n_points: int = 4,
+        use_dynamic_query_selection: bool = False,
+        doq_alpha: float = 1.0,
+        doq_beta: float = 1.0,
+        doq_grid_size: int = 4,
+        doq_qmin: int = 0,
+        doq_qmax: int = 0,
     ):
         super().__init__()
 
@@ -221,6 +227,31 @@ class Transformer(nn.Module):
             False,
         )
 
+        self.use_dynamic_query_selection = use_dynamic_query_selection
+        self.doq_alpha = doq_alpha
+        self.doq_beta = doq_beta
+        self.doq_grid_size = doq_grid_size
+        self.doq_qmin = doq_qmin
+        self.doq_qmax = doq_qmax
+        self.doq_out = None
+
+        if self.use_dynamic_query_selection:
+            from .doq import DynamicObjectQuerySelection
+
+            q_min = doq_qmin if doq_qmin > 0 else None
+            q_max = doq_qmax if doq_qmax > 0 else None
+            self.doq_module = DynamicObjectQuerySelection(
+                num_queries=self.num_queries,
+                g=doq_grid_size,
+                alpha=doq_alpha,
+                beta=doq_beta,
+                q_min=q_min,
+                q_max=q_max,
+                d_model=d_model,
+            )
+        else:
+            self.doq_module = None
+
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -264,6 +295,7 @@ class Transformer(nn.Module):
             - tgt: [bs, num_dn, d_model]. None in infer
 
         """
+        self.doq_out = None
         # prepare input for encoder
         src_flatten = []
         mask_flatten = []
@@ -391,27 +423,45 @@ class Transformer(nn.Module):
                 self.enc_out_bbox_embed(output_memory) + output_proposals
             )  # (bs, \sum{hw}, 4) unsigmoid
 
-            topk = self.num_queries
+            if self.use_dynamic_query_selection:
+                assert self.doq_module is not None
+                doq_out = self.doq_module(
+                    memory=output_memory,
+                    spatial_shapes=spatial_shapes,
+                    density_map=density_map,
+                    class_logits=enc_outputs_class_unselected,
+                    box_preds=enc_outputs_coord_unselected,
+                    mask_flatten=mask_flatten,
+                    proposals=output_proposals,
+                )
+                self.doq_out = doq_out
+                topk_proposals = doq_out.selected_indices
+                refpoint_embed_undetach = doq_out.selected_boxes
+                refpoint_embed_ = refpoint_embed_undetach.detach()
+                init_box_proposal = doq_out.selected_proposals.sigmoid()
+                tgt_undetach = doq_out.selected_memory
+            else:
+                topk = self.num_queries
 
-            topk_proposals = torch.topk(topk_logits, topk, dim=1)[1]  # bs, nq
+                topk_proposals = torch.topk(topk_logits, topk, dim=1)[1]  # bs, nq
 
-            # gather boxes
-            refpoint_embed_undetach = torch.gather(
-                enc_outputs_coord_unselected,
-                1,
-                topk_proposals.unsqueeze(-1).repeat(1, 1, 4),
-            )  # unsigmoid
-            refpoint_embed_ = refpoint_embed_undetach.detach()
-            init_box_proposal = torch.gather(
-                output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
-            ).sigmoid()  # sigmoid
+                # gather boxes
+                refpoint_embed_undetach = torch.gather(
+                    enc_outputs_coord_unselected,
+                    1,
+                    topk_proposals.unsqueeze(-1).repeat(1, 1, 4),
+                )  # unsigmoid
+                refpoint_embed_ = refpoint_embed_undetach.detach()
+                init_box_proposal = torch.gather(
+                    output_proposals, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4)
+                ).sigmoid()  # sigmoid
 
-            # gather tgt
-            tgt_undetach = torch.gather(
-                output_memory,
-                1,
-                topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model),
-            )
+                # gather tgt
+                tgt_undetach = torch.gather(
+                    output_memory,
+                    1,
+                    topk_proposals.unsqueeze(-1).repeat(1, 1, self.d_model),
+                )
 
             if self.embed_init_tgt:
                 tgt_ = (
@@ -1092,4 +1142,10 @@ def build_transformer(args):
         visual_density_cross_attn_n_points=getattr(
             args, "visual_density_cross_attn_n_points", 4
         ),
+        use_dynamic_query_selection=getattr(args, "use_dynamic_query_selection", False),
+        doq_alpha=getattr(args, "doq_alpha", 1.0),
+        doq_beta=getattr(args, "doq_beta", 1.0),
+        doq_grid_size=getattr(args, "doq_grid_size", 4),
+        doq_qmin=getattr(args, "doq_qmin", 0),
+        doq_qmax=getattr(args, "doq_qmax", 0),
     )

@@ -207,3 +207,12 @@ density_gl_d_point = "l1"
 density_gl_d_pixel = "l2"
 # Coordinate normalization mode: 'unit' ([0, 1] grid) or 'vendor' (scaled by crop_size)
 density_gl_norm_mode = "unit"
+
+# Dynamic Object Query (DOQ) selection (Adaptive Query Allocation)
+use_dynamic_query_selection = False
+doq_alpha = 1.0
+doq_beta = 1.0
+doq_grid_size = 4
+doq_qmin = 0
+doq_qmax = 0
+doq_loss_coef = 0.0

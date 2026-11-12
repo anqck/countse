@@ -751,6 +751,8 @@ class GroundingDINO(nn.Module):
         out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1]}
         out["density_map"] = density_map  # (bs, 1, H/8, W/8)
         out["density_feats"] = density_feats  # (bs, 256, H/8, W/8)
+        if getattr(self.transformer, "doq_out", None) is not None:
+            out["doq_out"] = self.transformer.doq_out
 
         # Used to calculate losses
         bs, len_td = text_dict["text_token_mask"].shape
@@ -1199,6 +1201,37 @@ class SetCriterion(nn.Module):
             "loss_gl_ent": gl_res["entropy"],
         }
 
+    def loss_doq(self, outputs, targets, indices, num_boxes):
+        """Eq. 8 in Ha et al. (2025): L_cls(M(X_hat) * c_hat, c) for DOQ selected queries."""
+        if self.weight_dict.get("loss_doq", 0.0) == 0:
+            dev = outputs["pred_logits"].device if "pred_logits" in outputs else torch.device("cpu")
+            return {"loss_doq": torch.zeros((), device=dev)}
+
+        doq_out = outputs.get("doq_out", None)
+        if doq_out is None or "interm_outputs" not in outputs:
+            dev = outputs["pred_logits"].device if "pred_logits" in outputs else torch.device("cpu")
+            return {"loss_doq": torch.zeros((), device=dev)}
+
+        interm_outputs = outputs["interm_outputs"]
+        if "one_hot" not in interm_outputs:
+            dev = outputs["pred_logits"].device if "pred_logits" in outputs else torch.device("cpu")
+            return {"loss_doq": torch.zeros((), device=dev)}
+
+        pred_logits = interm_outputs["pred_logits"]
+        selected_m = torch.gather(doq_out.ranking_metric, 1, doq_out.selected_indices)
+        m_factor = torch.clamp(selected_m, min=0.0).unsqueeze(-1)
+        mod_logits = pred_logits * m_factor
+
+        mod_outputs = {
+            "pred_logits": mod_logits,
+            "one_hot": interm_outputs["one_hot"],
+            "text_mask": interm_outputs.get("text_mask", None),
+        }
+        res = self.token_sigmoid_binary_focal_loss(
+            mod_outputs, targets, indices, num_boxes
+        )
+        return {"loss_doq": res["loss_ce"]}
+
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
             "labels": self.token_sigmoid_binary_focal_loss,
@@ -1208,6 +1241,7 @@ class SetCriterion(nn.Module):
             "density_l2": self.loss_density,
             "dm": self.loss_distribution_matching,
             "generalized": self.loss_generalized,
+            "doq": self.loss_doq,
         }
         assert loss in loss_map, f"do you really want to compute {loss} loss?"
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -1355,6 +1389,11 @@ class SetCriterion(nn.Module):
                 )
                 l_dict = {k + f"_interm": v for k, v in l_dict.items()}
                 losses.update(l_dict)
+
+            if "doq_out" in outputs and outputs["doq_out"] is not None:
+                losses.update(
+                    self.get_loss("doq", outputs, targets, indices, num_boxes)
+                )
 
         if return_indices:
             indices_list.append(indices0_copy)
@@ -1544,6 +1583,7 @@ def build_groundingdino(args):
     weight_dict["loss_dm.ot"] = getattr(args, "density_dm_loss_ot_coef", 0.0)
     weight_dict["loss_dm.tv"] = getattr(args, "density_dm_loss_tv_coef", 0.0)
     weight_dict["loss_generalized"] = getattr(args, "density_gl_loss_coef", 0.0)
+    weight_dict["loss_doq"] = getattr(args, "doq_loss_coef", 0.0)
 
     # losses = ['labels', 'boxes', 'cardinality']
     losses = ["labels", "boxes"]
