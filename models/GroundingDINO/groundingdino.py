@@ -51,6 +51,7 @@ from .bertwarper import (
     BertModelWarper,
     generate_masks_with_special_tokens_and_transfer_map,
 )
+from .doq import detach_tensor_container
 from .matcher import build_matcher
 from .positional_encoding_loca import PositionalEncodingsFixed
 from .transformer import build_transformer
@@ -1203,37 +1204,27 @@ class SetCriterion(nn.Module):
             "loss_gl_ent": gl_res["entropy"],
         }
 
-    @staticmethod
-    def _detach_tensor_container(value):
-        if torch.is_tensor(value):
-            if value.requires_grad or value.grad_fn is not None:
-                return value.detach()
-            return value
-        if isinstance(value, list):
-            return [SetCriterion._detach_tensor_container(v) for v in value]
-        if isinstance(value, tuple):
-            return tuple(SetCriterion._detach_tensor_container(v) for v in value)
-        return value
-
-    @classmethod
-    def _release_doq_out(cls, outputs):
+    def _release_unused_doq_out(self, outputs):
+        """Detach and clear unused doq_out when loss_doq weight is zero."""
+        if self.weight_dict.get("loss_doq", 0.0) != 0:
+            return
         doq_out = outputs.get("doq_out", None)
-        if doq_out is not None:
+        if doq_out is None:
+            return
+        if callable(getattr(doq_out, "detach_tensors", None)):
+            doq_out.detach_tensors()
+        else:
             if isinstance(doq_out, dict):
                 for key in list(doq_out.keys()):
-                    doq_out[key] = cls._detach_tensor_container(doq_out[key])
+                    doq_out[key] = detach_tensor_container(doq_out[key])
             if hasattr(doq_out, "__dict__"):
                 for key, val in list(vars(doq_out).items()):
-                    setattr(doq_out, key, cls._detach_tensor_container(val))
-        if "doq_out" in outputs:
-            outputs["doq_out"] = None
+                    setattr(doq_out, key, detach_tensor_container(val))
+        outputs["doq_out"] = None
 
     def loss_doq(self, outputs, targets, indices, num_boxes):
         """Eq. 8 in Ha et al. (2025): L_cls(M(X_hat) * c_hat, c) for DOQ selected queries."""
-        if self.weight_dict.get("loss_doq", 0.0) == 0:
-            dev = outputs["pred_logits"].device if "pred_logits" in outputs else torch.device("cpu")
-            self._release_doq_out(outputs)
-            return {"loss_doq": torch.zeros((), device=dev)}
+        self._release_unused_doq_out(outputs)
 
         doq_out = outputs.get("doq_out", None)
         if doq_out is None or "interm_outputs" not in outputs:
@@ -1423,11 +1414,7 @@ class SetCriterion(nn.Module):
                     self.get_loss("doq", outputs, targets, indices, num_boxes)
                 )
 
-        if (
-            outputs.get("doq_out", None) is not None
-            and self.weight_dict.get("loss_doq", 0.0) == 0
-        ):
-            self._release_doq_out(outputs)
+        self._release_unused_doq_out(outputs)
 
         if return_indices:
             indices_list.append(indices0_copy)
