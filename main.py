@@ -21,6 +21,7 @@ import warnings
 warnings.simplefilter("ignore")
 
 from util.get_param_dicts import get_param_dict
+from util.doq_config_guard import warn_if_doq_loss_disabled
 from util.logger import setup_logger
 from util.slconfig import DictAction, SLConfig
 from util.utils import BestMetricHolder
@@ -171,6 +172,7 @@ def main(args):
         color=False,
         name="detr",
     )
+    warn_if_doq_loss_disabled(args, logger=logger)
 
     logger.info("git:\n  {}\n".format(utils.get_sha()))
     logger.info("Command: " + " ".join(sys.argv))
