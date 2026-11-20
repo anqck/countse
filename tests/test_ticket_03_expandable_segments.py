@@ -2,6 +2,7 @@ import ast
 import importlib.metadata
 import os
 import pathlib
+import subprocess
 import sys
 import unittest
 from unittest.mock import patch
@@ -218,6 +219,162 @@ class TestConfigureCudaAllocConf(unittest.TestCase):
                 "PYTORCH_ALLOC_CONF": "expandable_segments:True",
             },
         )
+
+    def test_linux_cpu_only_torch_build_skips_expandable_segments(self):
+        from util.cuda_alloc_conf import configure_cuda_alloc_conf
+
+        for version in (
+            "2.10.0+cpu",
+            "2.8.0+cpu",
+            "2.10.0+CPU",
+            "2.9.0.dev20250901+cpu.cxx11.abi",
+        ):
+            with self.subTest(torch_version=version):
+                env = {}
+                configure_cuda_alloc_conf(env=env, platform="linux", torch_version=version)
+                self.assertEqual(env, {})
+
+                preexisting = {"PYTORCH_ALLOC_CONF": "max_split_size_mb:64"}
+                configure_cuda_alloc_conf(
+                    env=preexisting, platform="linux", torch_version=version
+                )
+                self.assertEqual(
+                    preexisting, {"PYTORCH_ALLOC_CONF": "max_split_size_mb:64"}
+                )
+
+        with patch("importlib.metadata.version", return_value="2.10.0+cpu"):
+            env = {}
+            configure_cuda_alloc_conf(env=env, platform="linux")
+            self.assertEqual(env, {})
+
+            preexisting = {"PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:64"}
+            configure_cuda_alloc_conf(env=preexisting, platform="linux")
+            self.assertEqual(
+                preexisting, {"PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:64"}
+            )
+
+    def test_linux_cli_device_cpu_skips_expandable_segments(self):
+        from util.cuda_alloc_conf import configure_cuda_alloc_conf
+
+        cpu_argvs = [
+            ["--device", "cpu"],
+            ["-c", "config/cfg_animal39.py", "--device", "cpu"],
+            ["--device", "cpu:0"],
+            ["--device=cpu"],
+            ["--device=cpu:0"],
+            ["--device", "cuda", "--device", "cpu"],
+            ["--device=CPU"],
+        ]
+        for argv in cpu_argvs:
+            with self.subTest(argv=argv):
+                env = {}
+                configure_cuda_alloc_conf(
+                    env=env,
+                    platform="linux",
+                    torch_version="2.10.0+cu130",
+                    argv=argv,
+                )
+                self.assertEqual(env, {})
+
+                preexisting = {"PYTORCH_ALLOC_CONF": "max_split_size_mb:64"}
+                configure_cuda_alloc_conf(
+                    env=preexisting,
+                    platform="linux",
+                    torch_version="2.10.0+cu130",
+                    argv=argv,
+                )
+                self.assertEqual(
+                    preexisting, {"PYTORCH_ALLOC_CONF": "max_split_size_mb:64"}
+                )
+
+        # When argv is None, reads sys.argv[1:].
+        for sys_argv in (
+            ["main.py", "--device", "cpu"],
+            ["main.py", "--device=cpu:0"],
+        ):
+            with self.subTest(sys_argv=sys_argv):
+                with patch.object(sys, "argv", sys_argv):
+                    env = {}
+                    configure_cuda_alloc_conf(
+                        env=env,
+                        platform="linux",
+                        torch_version="2.10.0+cu130",
+                    )
+                    self.assertEqual(env, {})
+
+        # Non-CPU device selections still configure expandable_segments:True.
+        non_cpu_argvs = [
+            ["--device", "cuda"],
+            ["--device=cuda:0"],
+            ["--device", "cpu", "--device", "cuda"],
+            ["--device"],
+            ["--", "--device", "cpu"],
+        ]
+        for argv in non_cpu_argvs:
+            with self.subTest(non_cpu_argv=argv):
+                env = {}
+                configure_cuda_alloc_conf(
+                    env=env,
+                    platform="linux",
+                    torch_version="2.10.0+cu130",
+                    argv=argv,
+                )
+                self.assertEqual(
+                    env, {"PYTORCH_ALLOC_CONF": "expandable_segments:True"}
+                )
+
+    def test_pytorch_cpu_import_and_execution_after_configure_has_no_warnings_or_crash(self):
+        repo_root = str(pathlib.Path(__file__).resolve().parents[1])
+        base_env = os.environ.copy()
+        base_env.pop("PYTORCH_ALLOC_CONF", None)
+        base_env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+        base_env["PYTHONPATH"] = repo_root
+
+        cases = [
+            ("default_argv_cpu", "configure_cuda_alloc_conf()", ["--device", "cpu"]),
+            (
+                "linux_cpu_build",
+                "configure_cuda_alloc_conf(platform='linux', torch_version='2.10.0+cpu')",
+                [],
+            ),
+            (
+                "linux_device_eq_cpu",
+                "configure_cuda_alloc_conf(platform='linux', torch_version='2.10.0+cu130', argv=['--device=cpu'])",
+                [],
+            ),
+        ]
+        for label, call_expr, cli_args in cases:
+            with self.subTest(case=label):
+                script = "\n".join(
+                    [
+                        "import os, warnings",
+                        "from util.cuda_alloc_conf import configure_cuda_alloc_conf",
+                        call_expr,
+                        "assert 'PYTORCH_ALLOC_CONF' not in os.environ",
+                        "assert 'PYTORCH_CUDA_ALLOC_CONF' not in os.environ",
+                        "with warnings.catch_warnings(record=True) as caught:",
+                        "    warnings.simplefilter('always')",
+                        "    import torch",
+                        "    x = torch.ones((4, 4), device='cpu')",
+                        "    total = float((x @ x.T).sum().item())",
+                        "    assert total == 64.0, total",
+                        "assert not caught, f'Unexpected warnings: {[str(w.message) for w in caught]}'",
+                    ]
+                )
+                proc = subprocess.run(
+                    [sys.executable, "-c", script, *cli_args],
+                    cwd=repo_root,
+                    env=base_env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(
+                    proc.returncode,
+                    0,
+                    f"Subprocess failed ({label}):\nstdout={proc.stdout}\nstderr={proc.stderr}",
+                )
+                self.assertEqual(proc.stderr.strip(), "", f"Unexpected stderr ({label}): {proc.stderr}")
 
 
 class TestMainEntryPoint(unittest.TestCase):

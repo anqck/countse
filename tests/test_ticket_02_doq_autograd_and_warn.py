@@ -235,6 +235,77 @@ class TestSetCriterionDOQRelease(unittest.TestCase):
         self.assertIsNotNone(sources["doq_only_src"].grad)
         self.assertIsNotNone(sources["density_src"].grad)
 
+    def test_zero_doq_loss_delegates_to_detach_tensors_and_handles_plain_dict_and_list_mocks(self):
+        device = torch.device("cpu")
+
+        class _DelegatingDOQ(dict):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.detach_calls = 0
+
+            def __getattr__(self, name):
+                try:
+                    return self[name]
+                except KeyError as exc:
+                    raise AttributeError(name) from exc
+
+            def detach_tensors(self):
+                self.detach_calls += 1
+                for k in list(self.keys()):
+                    val = self[k]
+                    if torch.is_tensor(val) and (val.requires_grad or val.grad_fn is not None):
+                        self[k] = val.detach()
+                return self
+
+        # 1. Zero loss_doq delegates to doq_out.detach_tensors() during forward and direct loss_doq.
+        criterion_zero = _build_criterion(loss_doq_weight=0.0)
+        outputs, targets, cat_list, captions, _ = _make_criterion_inputs(
+            device, include_interm=True, dict_like_doq=True
+        )
+        delegating_doq = _DelegatingDOQ(**outputs["doq_out"])
+        outputs["doq_out"] = delegating_doq
+
+        criterion_zero(outputs, targets, cat_list, captions)
+        self.assertEqual(delegating_doq.detach_calls, 1)
+        self.assertIsNone(outputs["doq_out"])
+
+        # Direct loss_doq call with weight=0 also delegates and clears outputs["doq_out"].
+        outputs_direct, targets_d, _, _, _ = _make_criterion_inputs(
+            device, include_interm=True, dict_like_doq=True
+        )
+        delegating_direct = _DelegatingDOQ(**outputs_direct["doq_out"])
+        outputs_direct["doq_out"] = delegating_direct
+        res = criterion_zero.loss_doq(outputs_direct, targets_d, indices=[], num_boxes=1.0)
+        self.assertEqual(delegating_direct.detach_calls, 1)
+        self.assertIsNone(outputs_direct["doq_out"])
+        self.assertEqual(res["loss_doq"].item(), 0.0)
+
+        # 2. Positive loss_doq must not call detach_tensors().
+        criterion_pos = _build_criterion(loss_doq_weight=1.5)
+        outputs_pos, targets_p, cat_list_p, captions_p, _ = _make_criterion_inputs(
+            device, include_interm=True, dict_like_doq=True
+        )
+        delegating_pos = _DelegatingDOQ(**outputs_pos["doq_out"])
+        outputs_pos["doq_out"] = delegating_pos
+        criterion_pos(outputs_pos, targets_p, cat_list_p, captions_p)
+        self.assertEqual(delegating_pos.detach_calls, 0)
+        self.assertIs(outputs_pos["doq_out"], delegating_pos)
+
+        # 3. Plain dict mock (no detach_tensors) with List[Tensor] falls back cleanly.
+        outputs_plain, targets_pl, cat_list_pl, captions_pl, sources_pl = _make_criterion_inputs(
+            device, include_interm=False, dict_like_doq=True
+        )
+        quota_src = sources_pl["doq_only_src"][:, :2] * 3.0
+        plain_dict_doq = dict(outputs_plain["doq_out"])
+        plain_dict_doq["region_quotas"] = [quota_src]
+        outputs_plain["doq_out"] = plain_dict_doq
+
+        criterion_zero(outputs_plain, targets_pl, cat_list_pl, captions_pl)
+        self.assertIsNone(outputs_plain["doq_out"])
+        self.assertIsNone(plain_dict_doq["ranking_metric"].grad_fn)
+        self.assertIsNone(plain_dict_doq["region_quotas"][0].grad_fn)
+        self.assertIsNotNone(quota_src.grad_fn)
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for GPU VRAM test")
     def test_zero_doq_loss_releases_pinned_cuda_autograd_intermediates_after_backward(self):
         device = torch.device("cuda")

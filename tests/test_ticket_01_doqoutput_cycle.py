@@ -107,6 +107,52 @@ class TestDOQOutputAcyclic(unittest.TestCase):
         self.assertEqual(restored, out)
         self.assertNotIn(restored, gc.get_referents(restored))
 
+    def test_detach_tensors_detaches_dict_and_list_fields_without_mutating_shared_tensors(self):
+        shared_memory = torch.randn(2, 4, 8, requires_grad=True)
+        ranking_metric = (shared_memory * 2.0).sum(dim=-1)
+        quota_a = ranking_metric[:, :2] * 0.5
+        quota_b = torch.tensor([[1, 2], [3, 4]], dtype=torch.long)
+        orig_region_quotas = [quota_a, quota_b]
+        selected_indices = torch.tensor([[0, 1], [2, 3]], dtype=torch.long)
+
+        out = DOQOutput(
+            selected_memory=shared_memory,
+            ranking_metric=ranking_metric,
+            selected_indices=selected_indices,
+            selected_boxes=None,
+            region_quotas=orig_region_quotas,
+        )
+
+        returned = out.detach_tensors()
+        self.assertIs(returned, out)
+
+        for key in ("selected_memory", "ranking_metric", "selected_indices"):
+            dict_val = out[key]
+            attr_val = getattr(out, key)
+            self.assertIs(dict_val, attr_val)
+            self.assertFalse(dict_val.requires_grad)
+            self.assertIsNone(dict_val.grad_fn)
+
+        self.assertIsNone(out["selected_boxes"])
+        self.assertIsNone(out.selected_boxes)
+
+        self.assertIsNot(out["region_quotas"], orig_region_quotas)
+        self.assertIs(out["region_quotas"], out.region_quotas)
+        self.assertEqual(len(out.region_quotas), 2)
+        self.assertFalse(out.region_quotas[0].requires_grad)
+        self.assertIsNone(out.region_quotas[0].grad_fn)
+        self.assertTrue(torch.equal(out.region_quotas[0], quota_a.detach()))
+        self.assertIs(out.region_quotas[1], quota_b)
+
+        # Caller-shared tensors and list must remain unmutated with intact autograd.
+        self.assertTrue(shared_memory.requires_grad)
+        self.assertIsNotNone(ranking_metric.grad_fn)
+        self.assertIs(orig_region_quotas[0], quota_a)
+        self.assertIsNotNone(quota_a.grad_fn)
+
+        (ranking_metric.sum() + quota_a.sum()).backward()
+        self.assertIsNotNone(shared_memory.grad)
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for GPU VRAM test")
     def test_dropping_doqoutput_frees_gpu_tensors_via_refcount_without_gc(self):
         device = torch.device("cuda")

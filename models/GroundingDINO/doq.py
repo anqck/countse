@@ -59,6 +59,25 @@ class DOQOutput(dict):
                 f"'{type(self).__name__}' object has no attribute '{name}'"
             ) from exc
 
+    def detach_tensors(self) -> "DOQOutput":
+        """Replace autograd-tracked tensors in-place with detached views without mutating caller tensors."""
+        for key in list(self.keys()):
+            self[key] = detach_tensor_container(self[key])
+        return self
+
+
+def detach_tensor_container(value: Any) -> Any:
+    """Return tensors or list/tuple containers with autograd-tracked tensors detached."""
+    if torch.is_tensor(value):
+        if value.requires_grad or value.grad_fn is not None:
+            return value.detach()
+        return value
+    if isinstance(value, list):
+        return [detach_tensor_container(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(detach_tensor_container(v) for v in value)
+    return value
+
 
 def hamilton_hare_allocation(
     total_budget: int,

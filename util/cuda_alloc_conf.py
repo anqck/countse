@@ -29,23 +29,57 @@ def _merge_alloc_conf(existing):
     return ",".join(tokens)
 
 
-def configure_cuda_alloc_conf(env=None, platform=None, torch_version=None):
+def _is_cpu_only_torch(version_str):
+    return "+cpu" in str(version_str).lower()
+
+
+def _cli_selects_cpu(argv):
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    selected_device = None
+    idx = 0
+    while idx < len(args_list):
+        arg = str(args_list[idx])
+        if arg == "--":
+            break
+        if arg == "--device":
+            if idx + 1 < len(args_list):
+                selected_device = str(args_list[idx + 1])
+                idx += 2
+                continue
+        elif arg.startswith("--device="):
+            selected_device = arg.split("=", 1)[1]
+        idx += 1
+
+    if selected_device is None:
+        return False
+    normalized = selected_device.strip().lower()
+    return normalized == "cpu" or normalized.startswith("cpu:")
+
+
+def configure_cuda_alloc_conf(env=None, platform=None, torch_version=None, argv=None):
     """Enable expandable_segments on Linux before PyTorch initializes CUDA."""
     target_env = os.environ if env is None else env
     target_platform = sys.platform if platform is None else platform
     if not target_platform.startswith("linux"):
+        return target_env
+    if _cli_selects_cpu(argv):
+        return target_env
+
+    resolved_version = torch_version
+    if resolved_version is None:
+        try:
+            resolved_version = importlib.metadata.version("torch")
+        except importlib.metadata.PackageNotFoundError:
+            return target_env
+
+    if _is_cpu_only_torch(resolved_version):
         return target_env
 
     target_vars = [
         name for name in _ALLOC_CONF_VARS if target_env.get(name, "").strip()
     ]
     if not target_vars:
-        if torch_version is None:
-            try:
-                torch_version = importlib.metadata.version("torch")
-            except importlib.metadata.PackageNotFoundError:
-                return target_env
-        parsed = _parse_major_minor(torch_version)
+        parsed = _parse_major_minor(resolved_version)
         if parsed is None:
             return target_env
         target_vars = [
