@@ -7,6 +7,11 @@ import random
 import time
 from pathlib import Path
 import os, sys
+
+from util.cuda_alloc_conf import configure_cuda_alloc_conf
+
+configure_cuda_alloc_conf()
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler, RandomSampler

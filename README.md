@@ -69,6 +69,13 @@ python -u main.py --output_dir ./countse_ckpt -c config/cfg_fsc147_val.py --data
 
 ```
 
+For remote Linux and SLURM training runs, `main.py` automatically enables expandable CUDA allocator segments before importing `torch` while preserving any user-supplied flags. To export it explicitly in SLURM job scripts:
+
+```bash
+export PYTORCH_ALLOC_CONF=expandable_segments:True       # PyTorch >= 2.9
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # PyTorch < 2.9
+```
+
 ## Inference
 You can download our trained [checkpoint](https://drive.google.com/file/d/1wJaWcrQB_z4LaQwApNChg_xN3DWvqfgP/view?pli=1) to obtain the results in the paper. Update your weight path and you can run inference on a single RTX 3090 using the following command. You can switch test datasets by modifying the -c and --datasets arguments.
 
