@@ -30,9 +30,34 @@ class DOQOutput(dict):
         region_quotas (List[Tensor]): Allocated integer query quotas per region for each level.
     """
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.__dict__ = self
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{name}'"
+            )
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{name}'"
+            ) from exc
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("__") and name.endswith("__"):
+            super().__setattr__(name, value)
+            return
+        self[name] = value
+
+    def __delattr__(self, name: str) -> None:
+        if name.startswith("__") and name.endswith("__"):
+            super().__delattr__(name)
+            return
+        try:
+            del self[name]
+        except KeyError as exc:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{name}'"
+            ) from exc
 
 
 def hamilton_hare_allocation(
