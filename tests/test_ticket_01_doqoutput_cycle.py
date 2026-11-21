@@ -203,7 +203,7 @@ class TestDOQOutputAcyclic(unittest.TestCase):
 
 class TestGroundingDINODOQLifecycle(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for GPU VRAM test")
-    def test_groundingdino_forward_clears_transformer_doq_out_and_preserves_transformer_contract(self):
+    def test_groundingdino_forward_and_transformer_8tuple_doq_out_contract(self):
         device = torch.device("cuda")
         model, _, _ = _build_small_groundingdino(device)
         model.eval()
@@ -228,7 +228,7 @@ class TestGroundingDINODOQLifecycle(unittest.TestCase):
                 out = model(samples, labels, label_list, captions=captions)
                 self.assertIn("doq_out", out)
                 self.assertIsInstance(out["doq_out"], DOQOutput)
-                self.assertIsNone(model.transformer.doq_out)
+                self.assertFalse(hasattr(model.transformer, "doq_out"))
 
                 doq_ref = weakref.ref(out["doq_out"])
                 del out
@@ -239,7 +239,7 @@ class TestGroundingDINODOQLifecycle(unittest.TestCase):
         self.assertIsNone(doq_ref())
         self.assertEqual(torch.cuda.memory_allocated(device), baseline_alloc)
 
-        # Verify Transformer.forward called directly still preserves the 7-tuple + doq_out contract.
+        # Verify Transformer.forward returns an 8-tuple with doq_out and stores no self.doq_out attribute.
         spatial_shapes = [(16, 16), (8, 8), (4, 4), (2, 2)]
         srcs = [torch.randn(bs, 256, h, w, device=device) for h, w in spatial_shapes]
         masks = [torch.zeros(bs, h, w, dtype=torch.bool, device=device) for h, w in spatial_shapes]
@@ -259,9 +259,9 @@ class TestGroundingDINODOQLifecycle(unittest.TestCase):
                 tgt=None,
                 text_dict=text_dict,
             )
-        self.assertEqual(len(t_out), 7)
-        self.assertIsNotNone(model.transformer.doq_out)
-        self.assertIsInstance(model.transformer.doq_out, DOQOutput)
+        self.assertEqual(len(t_out), 8)
+        self.assertIsInstance(t_out[7], DOQOutput)
+        self.assertFalse(hasattr(model.transformer, "doq_out"))
 
 
 class TestGroundingDINOMultiStepRegression(unittest.TestCase):
@@ -331,7 +331,7 @@ class TestGroundingDINOMultiStepRegression(unittest.TestCase):
                 torch.cuda.synchronize()
                 pre_step_allocs.append(torch.cuda.memory_allocated(device))
             outputs = model(samples, labels_uncropped, label_list, captions=captions)
-            self.assertIsNone(model.transformer.doq_out)
+            self.assertFalse(hasattr(model.transformer, "doq_out"))
             loss_dict = criterion(outputs, targets, cap_list, captions)
             losses = sum(
                 loss_dict[k] * criterion.weight_dict[k]
@@ -385,7 +385,7 @@ class TestGroundingDINOMultiStepRegression(unittest.TestCase):
 
             for step in range(16):
                 outputs = model(samples, labels_uncropped, label_list, captions=captions)
-                self.assertIsNone(model.transformer.doq_out)
+                self.assertFalse(hasattr(model.transformer, "doq_out"))
 
                 torch.cuda.synchronize()
                 per_step_allocs.append(torch.cuda.memory_allocated(device))

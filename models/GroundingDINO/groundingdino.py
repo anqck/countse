@@ -721,6 +721,7 @@ class GroundingDINO(nn.Module):
             init_box_proposal,
             density_feats,
             density_map,
+            doq_out,
         ) = self.transformer(
             srcs,
             masks,
@@ -752,10 +753,8 @@ class GroundingDINO(nn.Module):
         out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord_list[-1]}
         out["density_map"] = density_map  # (bs, 1, H/8, W/8)
         out["density_feats"] = density_feats  # (bs, 256, H/8, W/8)
-        doq_out = getattr(self.transformer, "doq_out", None)
         if doq_out is not None:
             out["doq_out"] = doq_out
-            self.transformer.doq_out = None
 
         # Used to calculate losses
         bs, len_td = text_dict["text_token_mask"].shape

@@ -233,7 +233,6 @@ class Transformer(nn.Module):
         self.doq_grid_size = doq_grid_size
         self.doq_qmin = doq_qmin
         self.doq_qmax = doq_qmax
-        self.doq_out = None
 
         if self.use_dynamic_query_selection:
             from .doq import DynamicObjectQuerySelection
@@ -295,7 +294,7 @@ class Transformer(nn.Module):
             - tgt: [bs, num_dn, d_model]. None in infer
 
         """
-        self.doq_out = None
+        doq_out = None
         # prepare input for encoder
         src_flatten = []
         mask_flatten = []
@@ -434,7 +433,6 @@ class Transformer(nn.Module):
                     mask_flatten=mask_flatten,
                     proposals=output_proposals,
                 )
-                self.doq_out = doq_out
                 topk_proposals = doq_out.selected_indices
                 refpoint_embed_undetach = doq_out.selected_boxes
                 refpoint_embed_ = refpoint_embed_undetach.detach()
@@ -559,6 +557,7 @@ class Transformer(nn.Module):
             init_box_proposal,
             density_feats,
             density_map,
+            doq_out,
         )
         # hs: (n_dec, bs, nq, d_model)
         # references: sigmoid coordinates. (n_dec+1, bs, bq, 4)
@@ -567,6 +566,7 @@ class Transformer(nn.Module):
         #           (n_enc+1, bs, nq, query_dim) or (1, bs, nq, query_dim) or None
         # density_feats: bs, (H/8) * (W/8), 256
         # density_map: bs, 1, H/8, W/8
+        # doq_out: DOQOutput or None
 
 
 class TransformerEncoder(nn.Module):
