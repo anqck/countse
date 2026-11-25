@@ -1236,14 +1236,19 @@ class SetCriterion(nn.Module):
             return {"loss_doq": torch.zeros((), device=dev)}
 
         pred_logits = interm_outputs["pred_logits"]
+        text_mask = interm_outputs.get("text_mask", None)
         selected_m = torch.gather(doq_out.ranking_metric, 1, doq_out.selected_indices)
         m_factor = torch.clamp(selected_m, min=0.0).unsqueeze(-1)
-        mod_logits = pred_logits * m_factor
+        valid_mask = torch.isfinite(pred_logits)
+        if text_mask is not None:
+            valid_mask = valid_mask & text_mask.unsqueeze(1)
+        safe_logits = torch.where(valid_mask, pred_logits, pred_logits.new_zeros(()))
+        mod_logits = safe_logits * m_factor
 
         mod_outputs = {
             "pred_logits": mod_logits,
             "one_hot": interm_outputs["one_hot"],
-            "text_mask": interm_outputs.get("text_mask", None),
+            "text_mask": text_mask,
         }
         res = self.token_sigmoid_binary_focal_loss(
             mod_outputs, targets, indices, num_boxes
